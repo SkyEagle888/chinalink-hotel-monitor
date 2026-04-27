@@ -238,16 +238,18 @@ def fetch_page(page_num: int) -> tuple[str, list[dict]]:
     return text, promotions
 
 
-def scrape_all_pages() -> tuple[str, list[dict]]:
-    """抓取第 1–MAX_PAGES 頁。"""
+def scrape_all_pages() -> tuple[str, list[dict], int]:
+    """抓取第 1–MAX_PAGES 頁。回傳 (text, promotions, pages_scanned)。"""
     all_text: list[str] = []
     all_promotions: list[dict] = []
+    pages_scanned = 0
 
     for i in range(1, MAX_PAGES + 1):
         try:
             text, promos = fetch_page(i)
             all_text.append(f"=== 優惠頁面 {i} ===\n{text}")
             all_promotions.extend(promos)
+            pages_scanned += 1
             time.sleep(1.5)
         except requests.RequestException as e:
             if i == 1:
@@ -255,7 +257,7 @@ def scrape_all_pages() -> tuple[str, list[dict]]:
             print(f"[WARN] 第 {i} 頁抓取失敗：{e}")
 
     combined_text = "\n\n".join(all_text)
-    return combined_text, all_promotions
+    return combined_text, all_promotions, pages_scanned
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -422,21 +424,70 @@ def post_to_discord(message: str) -> None:
     print(f"[INFO] Discord 通知已發送（{len(message)} 字元）")
 
 
-def build_no_packages_message(excluded: int) -> str:
+def count_hotel_packages(summary: str) -> int:
+    """從 LLM 摘要中計算酒店套票數量。"""
+    match = re.search(r"找到\s*(\d+)\s*個酒店套票", summary)
+    if match:
+        return int(match.group(1))
+    return summary.count("🏨 **")
+
+
+def build_stats_footer(
+    pages_scanned: int,
+    total_promos: int,
+    pre_filtered: int,
+    llm_candidates: int,
+    hotel_count: int,
+) -> str:
+    """構建統計資訊頁尾。"""
+    return (
+        f"📊 掃描：{pages_scanned} 頁 | "
+        f"優惠：{total_promos} | "
+        f"預篩排除：{pre_filtered} | "
+        f"LLM 分析：{llm_candidates} | "
+        f"酒店套票：{hotel_count}"
+    )
+
+
+def build_no_packages_message(
+    excluded: int,
+    stats: dict,
+) -> str:
     """構建「無酒店套票」Discord 訊息（不經 LLM）。"""
+    stats_footer = build_stats_footer(
+        stats["pages_scanned"],
+        stats["total_promos"],
+        excluded,
+        0,
+        0,
+    )
     return (
         f"🔍 **環島中港通 酒店套票** | {TODAY_SHORT}\n\n"
         f"🔍 今日無酒店套票。已排除 {excluded} 個其他優惠。\n\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"{stats_footer}\n"
         f"━━━━━━━━━━━━━━━━━━━━━━\n"
         f"🔗 查閱所有優惠 → "
         f"https://www.tilchinalink.com/promotions.php"
     )
 
 
-def build_discord_message(summary: str) -> str:
+def build_discord_message(summary: str, stats: dict) -> str:
     """根據 LLM 摘要組合完整 Discord 訊息。"""
+    hotel_count = count_hotel_packages(summary)
+
+    stats_footer = build_stats_footer(
+        stats["pages_scanned"],
+        stats["total_promos"],
+        stats["pre_filtered"],
+        stats["llm_candidates"],
+        hotel_count,
+    )
+
     footer = (
         "\n\n━━━━━━━━━━━━━━━━━━━━━━"
+        f"\n{stats_footer}"
+        "\n━━━━━━━━━━━━━━━━━━━━━━"
         "\n🔗 查閱所有優惠 → "
         "https://www.tilchinalink.com/promotions.php"
     )
@@ -470,10 +521,10 @@ def main() -> None:
 
     # 步驟 1：抓取
     try:
-        raw_text, all_promotions = scrape_all_pages()
+        raw_text, all_promotions, pages_scanned = scrape_all_pages()
         print(
             f"[INFO] 已抓取 {len(raw_text):,} 字元，"
-            f"共 {MAX_PAGES} 頁，"
+            f"共 {pages_scanned} 頁，"
             f"解析到 {len(all_promotions)} 個優惠"
         )
     except Exception as e:
@@ -485,12 +536,25 @@ def main() -> None:
         )
         return
 
+    stats: dict = {
+        "pages_scanned": pages_scanned,
+        "total_promos": len(all_promotions),
+        "pre_filtered": 0,
+        "llm_candidates": 0,
+    }
+
     # 步驟 2：變更偵測
     current_hash = compute_hash(raw_text)
     if current_hash == load_last_hash():
+        stats_no_change = build_stats_footer(pages_scanned, len(all_promotions), 0, 0, 0)
         post_to_discord(
-            f"ℹ️ 環島中港通 酒店套票 — "
-            f"今日頁面無更新（{TODAY_SHORT}）"
+            f"ℹ️ **環島中港通 酒店套票** — "
+            f"今日頁面無更新（{TODAY_SHORT}）\n\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"{stats_no_change}\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"🔗 查閱所有優惠 → "
+            f"https://www.tilchinalink.com/promotions.php"
         )
         print("[INFO] 無變更，提前退出。")
         return
@@ -500,6 +564,7 @@ def main() -> None:
     # 步驟 3：程序化預篩選
     if all_promotions:
         filtered, pre_excluded = prefilter(all_promotions)
+        stats["pre_filtered"] = pre_excluded
     else:
         print("[WARN] 未能解析結構化優惠，回退至完整文字模式")
         filtered = []
@@ -513,12 +578,14 @@ def main() -> None:
     if filtered:
         # 步驟 4a：有候選優惠 → 發送預篩選內容至 LLM
         llm_content = build_llm_content(filtered)
+        stats["llm_candidates"] = len(filtered)
     elif not all_promotions:
         # 步驟 4b：HTML 結構變更 → 回退至完整文字
         llm_content = raw_text[:MAX_LLM_CHARS]
+        stats["llm_candidates"] = 1
     else:
         # 步驟 4c：預篩選已排除所有優惠 → 跳過 LLM
-        post_to_discord(build_no_packages_message(pre_excluded))
+        post_to_discord(build_no_packages_message(pre_excluded, stats))
         save_hash(current_hash)
         print("[INFO] 預篩選已排除所有優惠，跳過 LLM。")
         return
@@ -535,7 +602,7 @@ def main() -> None:
 
     # 步驟 6：發送至 Discord
     try:
-        message = build_discord_message(summary)
+        message = build_discord_message(summary, stats)
         post_to_discord(message)
     except Exception as e:
         print(f"[ERROR] Discord 發送失敗：{e}")
