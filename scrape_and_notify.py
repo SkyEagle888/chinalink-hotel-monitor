@@ -366,8 +366,10 @@ def call_llm(content: str) -> str:
     client = OpenAI(
         api_key=API_KEY,
         base_url=BASE_URL_API,
-        default_headers={"HTTP-Referer": "https://github.com/SkyEagle888/chinalink-hotel-monitor"},
-        default_query={"app": "chinalink-hotel-monitor"},
+        default_headers={
+            "HTTP-Referer": "https://github.com/SkyEagle888/chinalink-hotel-monitor",
+            "X-Title": "chinalink-hotel-monitor",
+        },
     )
 
     last_error: Exception | None = None
