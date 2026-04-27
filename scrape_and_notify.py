@@ -63,7 +63,7 @@ EXCLUDE_KEYWORDS = [
 ]
 
 MAX_LLM_CHARS = 12000
-PROMO_STALE_DAYS = 180
+PROMO_STALE_DAYS = 60
 
 SYSTEM_PROMPT = f"""你是一位專為香港用戶服務的旅遊套票分析師。
 今天的日期是 {TODAY_CN}。
@@ -263,7 +263,12 @@ def scrape_all_pages() -> tuple[str, list[dict]]:
 # ─────────────────────────────────────────────────────────────────────────────
 
 def is_expired(promo: dict) -> bool:
-    """根據發布日期及內容結束日期判斷是否已過期。"""
+    """根據發布日期及內容結束日期判斷是否已過期。
+
+    規則：
+    1. 若內容中有明確結束日期 → 以該日期判斷
+    2. 若無明確結束日期 → 發布日期超過 PROMO_STALE_DAYS 天即視為過期
+    """
     date_str = promo.get("date", "")
     if not date_str:
         return False
@@ -275,15 +280,16 @@ def is_expired(promo: dict) -> bool:
     except ValueError:
         return False
 
-    if (TODAY - publish_date).days > PROMO_STALE_DAYS:
-        return True
-
     end_dates = extract_end_dates(
         promo.get("content", ""), publish_date.year
     )
+
     if end_dates:
         latest_end = max(end_dates)
         if latest_end < TODAY:
+            return True
+    else:
+        if (TODAY - publish_date).days > PROMO_STALE_DAYS:
             return True
 
     return False
