@@ -363,7 +363,12 @@ def save_hash(hash_value: str) -> None:
 
 def call_llm(content: str) -> str:
     """使用模型備用鏈調用 OpenRouter。"""
-    client = OpenAI(api_key=API_KEY, base_url=BASE_URL_API)
+    client = OpenAI(
+        api_key=API_KEY,
+        base_url=BASE_URL_API,
+        default_headers={"HTTP-Referer": "https://github.com/SkyEagle888/chinalink-hotel-monitor"},
+        default_query={"app": "chinalink-hotel-monitor"},
+    )
 
     last_error: Exception | None = None
     for model in MODELS:
@@ -375,6 +380,7 @@ def call_llm(content: str) -> str:
                     {"role": "system", "content": SYSTEM_PROMPT},
                     {"role": "user", "content": content},
                 ],
+                extra_body={"application": "chinalink-hotel-monitor"},
                 timeout=90,
             )
             result = response.choices[0].message.content.strip()
