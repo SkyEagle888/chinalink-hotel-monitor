@@ -1,0 +1,48 @@
+name: 每日酒店套票監察 — 環島中港通
+
+on:
+  schedule:
+    - cron: '0 1 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  monitor:
+    name: 抓取 → 預篩選 → 摘要 → 通知
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run hotel package monitor
+        env:
+          OPENROUTER_API_KEY:         ${{ secrets.OPENROUTER_API_KEY }}
+          DISCORD_WEBHOOK_URL:        ${{ secrets.DISCORD_WEBHOOK_URL }}
+          OPENROUTER_BASE_URL:        ${{ vars.OPENROUTER_BASE_URL }}
+          OPENROUTER_MODEL_PRIMARY:   ${{ vars.OPENROUTER_MODEL_PRIMARY }}
+          OPENROUTER_MODEL_SECONDARY: ${{ vars.OPENROUTER_MODEL_SECONDARY }}
+          OPENROUTER_MODEL_TERTIARY:  ${{ vars.OPENROUTER_MODEL_TERTIARY }}
+        run: python scrape_and_notify.py
+
+      - name: Commit updated hash
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add last_hash.txt
+          git diff --staged --quiet || git commit -m "chore: update page hash [skip ci]"
+          git push
