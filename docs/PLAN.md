@@ -856,14 +856,14 @@ meta-llama/llama-3.3-70b-instruct:free  ← 第三（Meta，131K）
 > **Checkbox 約定**：`[x]` = 已實作且通過驗證；`[ ]` = 待實作或未驗證
 
 ### T9.1 — 缺陷修正（🔴 必修）
-- [ ] **T9.1.1** [BUG-1] 實作 FR-1.3 早停：抓取後比對當前頁最新發布日期，若全部 >180 天則 `break`（`scrape_and_notify.py:247`）
-- [ ] **T9.1.2** [BUG-2] 統一 `PROMO_STALE_DAYS=180` 並支援環境變量覆寫（`scrape_and_notify.py:66`）
-- [ ] **T9.1.3** [BUG-3 / EFF-2] 雜湊前內容歸一化：移除 `<div class="ad">`、view counter、隨機 ID 後再 hash
+- [x] **T9.1.1** [BUG-1] 實作 FR-1.3 早停：抓取後比對當前頁最新發布日期，若全部 >180 天則 `break`（`scrape_and_notify.py:247`）— `_is_page_stale()` + 迴圈 break（commit 8113ae7）
+- [x] **T9.1.2** [BUG-2] 統一 `PROMO_STALE_DAYS=180` 並支援環境變量覆寫（`scrape_and_notify.py:66`）— `int(os.environ.get("PROMO_STALE_DAYS", "180"))`（commit 8113ae7）
+- [x] **T9.1.3** [BUG-3 / EFF-2] 雜湊前內容歸一化：移除 `<div class="ad">`、view counter、隨機 ID 後再 hash — `DYNAMIC_CLASS_PATTERN` decompose（commit 8113ae7）
 
 ### T9.2 — 結構化 LLM 輸出
-- [ ] **T9.2.1** [ACC-1] 切換至 JSON schema 模式（`response_format={"type":"json_schema", ...}`）
-- [ ] **T9.2.2** [ACC-1] 替換 `count_hotel_packages` regex 為 JSON 解析（`scrape_and_notify.py:427`）
-- [ ] **T9.2.3** [ACC-4] 注入 few-shot 範本（2 合格 + 2 誤判）至 system prompt
+- [x] **T9.2.1** [ACC-1] 切換至 JSON 模式（`response_format={"type":"json_object"}`，廣泛支援 3 個備用模型）— 配合嚴格 schema 描述 + 4 個 few-shot 範例
+- [x] **T9.2.2** [ACC-1] 替換 `count_hotel_packages` regex 為 `len(llm_data["packages"])` — `build_discord_message` 改接受 `dict` 而非 `str`
+- [x] **T9.2.3** [ACC-4] 注入 few-shot 範本（2 合格 + 2 誤判）至 system prompt — 含 4 個完整 I/O JSON 範例
 
 ### T9.3 — 過濾與日期強化
 - [ ] **T9.3.1** [ACC-2] 擴展 `extract_end_dates` regex 覆蓋「即日起」「至X月X日」（無年）slash 格式（`scrape_and_notify.py:134`）

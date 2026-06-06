@@ -5,6 +5,7 @@
 """
 
 import hashlib
+import json
 import os
 import datetime
 import time
@@ -98,32 +99,86 @@ SYSTEM_PROMPT = f"""你是一位專為香港用戶服務的旅遊套票分析師
   ✗ 新路線或新站點開通優惠（酒店僅為登車站點）
   ✗ 售票中心折扣券
 
-指示：
-1. 掃描每個優惠。
-2. 不符合酒店套票定義 → 完全略過，不作任何提及。
-3. 符合 → 檢查截至 {TODAY_CN} 是否仍然有效。
-   - 已過期 → 靜默略過。
-   - 仍有效或無結束日期 → 輸出完整詳情。
-4. 對每個有效的合資格酒店套票，輸出以下格式：
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+輸出格式：JSON 物件（不可含說明、Markdown 區塊或前後註解）
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-🏨 **{{套票名稱}}**
-📅 有效期：{{有效日期，若無結束日期則填「持續有效」}}
-💰 價格：{{每位價格或套票價，若不明確則填「請查閱官網」}}
-🍽️ 餐飲：{{自助餐或早餐詳情}}
-🛏️ 住宿：{{晚數}}晚，{{房型（如有說明）}}
-📲 訂票：{{訂票渠道：微信小程式 / 支付寶 / 售票中心等}}
-📝 備注：{{主要限制或亮點，最多一句}}
-🔗 優惠詳情：{{此優惠的個別 URL}}
+JSON 結構：
+{{
+  "packages": [
+    {{
+      "title": "套票名稱",
+      "validity": "有效日期範圍，無結束日期則填「持續有效」",
+      "price": "每位／每套票價，否則填「請查閱官網」",
+      "dining": "自助餐或早餐詳情",
+      "nights": 1,
+      "room_type": "房型描述，無則填「標準房」",
+      "booking": "訂票渠道：微信小程式 / 支付寶 / 售票中心",
+      "note": "一句限制或亮點",
+      "url": "此優惠的個別 URL"
+    }}
+  ],
+  "excluded_count": 已預篩選後剩餘的優惠中，LLM 排除的數量（整數）
+}}
 
-5. 每個套票區塊之間空一行。
-6. 所有輸出區塊後，輸出一行統計：
-   「✅ 找到 N 個酒店套票 | 🚫 已排除 M 個非酒店優惠」
-7. 若無合資格有效套票，輸出：
-   「🔍 今日無酒店套票。已排除 M 個其他優惠。」
-8. 每個區塊不超過 120 字。
-9. **所有輸出使用繁體中文。**
-10. **不要輸出交通時間表、班次或路線詳情。**
-11. 不要在格式以外添加任何說明或前言。
+規則：
+1. packages 為陣列，僅含合資格、仍然有效的酒店套票。
+2. 已過期或不合資格 → 不加入 packages。
+3. excluded_count = 你（LLM）在本次輸入中「掃描但判定為非酒店」的數量。
+4. nights 必須為整數，無法判斷時填 1。
+5. url 必須與輸入中的優惠連結一致；不得編造。
+6. 所有字串使用繁體中文。
+7. 不輸出交通時間表、班次或路線詳情。
+8. 每個套票的 note 不超過一句。
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+示範範例（Few-shot：2 合資格 + 2 排除）
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+範例 1 — 合資格酒店套票（明確住宿+交通+餐飲）：
+輸入：
+=== 優惠：珠海希爾頓花園酒店 2人套票 ===
+發布日期：2026-06-01
+入住希爾頓花園酒店 1晚 標準大床房，包自助早餐 2位
++ 來回直通巴士接送 香港上車點至酒店
+每位 HK$988 起
+優惠連結：https://www.tilchinalink.com/promotions.php?id=201
+輸出：
+{{"packages":[{{"title":"珠海希爾頓花園酒店 2人套票","validity":"持續有效","price":"每位 HK$988 起","dining":"自助早餐 2位","nights":1,"room_type":"標準大床房","booking":"微信小程式","note":"需 2 位成行","url":"https://www.tilchinalink.com/promotions.php?id=201"}}],"excluded_count":0}}
+
+範例 2 — 合資格酒店套票（含明確結束日期）：
+輸入：
+=== 優惠：中山溫泉賓館家庭套票 ===
+發布日期：2026-05-15
+中山溫泉賓館 高級溫泉房 2晚 + 2位自助晚餐 + 來回車票
+有效期：2026年5月20日 至 2026年8月31日
+每套 HK$1,580
+優惠連結：https://www.tilchinalink.com/promotions.php?id=205
+輸出：
+{{"packages":[{{"title":"中山溫泉賓館家庭套票","validity":"2026年5月20日 至 2026年8月31日","price":"每套 HK$1,580","dining":"自助晚餐 2位","nights":2,"room_type":"高級溫泉房","booking":"售票中心","note":"暑假旺季","url":"https://www.tilchinalink.com/promotions.php?id=205"}}],"excluded_count":0}}
+
+範例 3 — 演唱會套票（嚴格排除）：
+輸入：
+=== 優惠：郭富城演唱會澳門站 酒店車票套票 ===
+發布日期：2026-05-20
+澳門威尼斯人 1晚 標準房 + 來回直通巴士 + 郭富城演唱會 A 區門票 2位
+優惠連結：https://www.tilchinalink.com/promotions.php?id=210
+輸出：
+{{"packages":[],"excluded_count":1}}
+
+範例 4 — 純車費優惠（酒店名稱僅為站點）：
+輸入：
+=== 優惠：花山新增站點限定優惠 — 買去程送回程 ===
+發布日期：2026-06-03
+花山希爾頓歡朋酒店為新登車站點，買去程送回程
+每位 HK$120 起
+優惠連結：https://www.tilchinalink.com/promotions.php?id=212
+輸出：
+{{"packages":[],"excluded_count":1}}
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+現在請處理以下用戶提供的優惠，僅回傳 JSON：
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 """
 
 
@@ -401,8 +456,13 @@ def save_hash(hash_value: str) -> None:
 # LLM 摘要
 # ─────────────────────────────────────────────────────────────────────────────
 
-def call_llm(content: str) -> str:
-    """使用模型備用鏈調用 OpenRouter。"""
+def call_llm(content: str) -> dict:
+    """使用模型備用鏈調用 OpenRouter，回傳結構化 JSON 結果。
+
+    回傳結構：{"packages": [{"title", "validity", "price", "dining",
+    "nights", "room_type", "booking", "note", "url"}, ...],
+    "excluded_count": int}
+    """
     client = OpenAI(
         api_key=API_KEY,
         base_url=BASE_URL_API,
@@ -422,12 +482,13 @@ def call_llm(content: str) -> str:
                     {"role": "system", "content": SYSTEM_PROMPT},
                     {"role": "user", "content": content},
                 ],
+                response_format={"type": "json_object"},
                 extra_body={"application": "chinalink-hotel-monitor"},
                 timeout=90,
             )
-            result = response.choices[0].message.content.strip()
+            raw = response.choices[0].message.content.strip()
             print(f"[INFO] 成功使用模型：{model}")
-            return result
+            return _parse_llm_json(raw)
         except Exception as e:
             print(f"[WARN] 模型 {model} 失敗：{e}")
             last_error = e
@@ -436,6 +497,51 @@ def call_llm(content: str) -> str:
     raise RuntimeError(
         f"所有 LLM 模型均失敗。最後錯誤：{last_error}"
     )
+
+
+def _parse_llm_json(raw: str) -> dict:
+    """解析 LLM 回傳的 JSON 內容，容錯處理缺欄位或型別錯誤。"""
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError as e:
+        raise RuntimeError(
+            f"LLM 回應非合法 JSON：{e}; raw={raw[:200]}"
+        ) from e
+
+    if not isinstance(data, dict):
+        raise RuntimeError(
+            f"LLM 回應不是 JSON 物件：{type(data).__name__}"
+        )
+
+    packages = data.get("packages", [])
+    if not isinstance(packages, list):
+        packages = []
+
+    excluded = data.get("excluded_count", 0)
+    if not isinstance(excluded, int) or isinstance(excluded, bool):
+        excluded = 0
+
+    normalized: list[dict] = []
+    for pkg in packages:
+        if not isinstance(pkg, dict):
+            continue
+        try:
+            nights = int(pkg.get("nights", 1))
+        except (TypeError, ValueError):
+            nights = 1
+        normalized.append({
+            "title": str(pkg.get("title", "")).strip(),
+            "validity": str(pkg.get("validity", "持續有效")).strip() or "持續有效",
+            "price": str(pkg.get("price", "請查閱官網")).strip() or "請查閱官網",
+            "dining": str(pkg.get("dining", "")).strip(),
+            "nights": nights,
+            "room_type": str(pkg.get("room_type", "標準房")).strip() or "標準房",
+            "booking": str(pkg.get("booking", "微信小程式")).strip() or "微信小程式",
+            "note": str(pkg.get("note", "")).strip(),
+            "url": str(pkg.get("url", "")).strip(),
+        })
+
+    return {"packages": normalized, "excluded_count": excluded}
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -456,12 +562,47 @@ def post_to_discord(message: str) -> None:
     print(f"[INFO] Discord 通知已發送（{len(message)} 字元）")
 
 
-def count_hotel_packages(summary: str) -> int:
-    """從 LLM 摘要中計算酒店套票數量。"""
-    match = re.search(r"找到\s*(\d+)\s*個酒店套票", summary)
-    if match:
-        return int(match.group(1))
-    return summary.count("🏨 **")
+def _render_package_block(pkg: dict) -> str:
+    """將單一套票 JSON 物件渲染為 SCOPE.md §7 格式的 Markdown 區塊。"""
+    title = pkg.get("title") or "未命名套票"
+    validity = pkg.get("validity") or "持續有效"
+    price = pkg.get("price") or "請查閱官網"
+    dining = pkg.get("dining") or "請查閱官網"
+    room_type = pkg.get("room_type") or "標準房"
+    booking = pkg.get("booking") or "微信小程式"
+    note = pkg.get("note") or "—"
+    nights = pkg.get("nights", 1)
+    url = pkg.get("url") or ""
+
+    block = (
+        f"🏨 **{title}**\n"
+        f"📅 有效期：{validity}\n"
+        f"💰 價格：{price}\n"
+        f"🍽️ 餐飲：{dining}\n"
+        f"🛏️ 住宿：{nights} 晚，{room_type}\n"
+        f"📲 訂票：{booking}\n"
+        f"📝 備注：{note}"
+    )
+    if url:
+        block += f"\n🔗 優惠詳情：{url}"
+    return block
+
+
+def _render_packages_markdown(llm_data: dict) -> str:
+    """將 LLM JSON 結果渲染為 SCOPE.md §7 格式的 Markdown 摘要。"""
+    packages = llm_data.get("packages", [])
+    excluded = llm_data.get("excluded_count", 0)
+
+    if not packages:
+        return f"🔍 今日無酒店套票。已排除 {excluded} 個其他優惠。"
+
+    blocks = [_render_package_block(p) for p in packages]
+    summary = "\n\n".join(blocks)
+    summary += (
+        f"\n\n✅ 找到 {len(packages)} 個酒店套票 | "
+        f"🚫 已排除 {excluded} 個非酒店優惠"
+    )
+    return summary
 
 
 def build_stats_footer(
@@ -504,9 +645,10 @@ def build_no_packages_message(
     )
 
 
-def build_discord_message(summary: str, stats: dict) -> str:
-    """根據 LLM 摘要組合完整 Discord 訊息。"""
-    hotel_count = count_hotel_packages(summary)
+def build_discord_message(llm_data: dict, stats: dict) -> str:
+    """根據 LLM 結構化結果組合完整 Discord 訊息（SCOPE.md §7 格式）。"""
+    hotel_count = len(llm_data.get("packages", []))
+    summary = _render_packages_markdown(llm_data)
 
     stats_footer = build_stats_footer(
         stats["pages_scanned"],
@@ -524,13 +666,7 @@ def build_discord_message(summary: str, stats: dict) -> str:
         "https://www.tilchinalink.com/promotions.php"
     )
 
-    no_packages = (
-        "今日無酒店套票" in summary
-        or "0 個酒店套票" in summary
-        or summary.strip().startswith("🔍")
-    )
-
-    if no_packages:
+    if hotel_count == 0:
         header = (
             f"🔍 **環島中港通 酒店套票** "
             f"| {TODAY_SHORT}\n\n"
@@ -624,7 +760,7 @@ def main() -> None:
 
     # 步驟 5：LLM 摘要
     try:
-        summary = call_llm(llm_content)
+        llm_data = call_llm(llm_content)
     except Exception as e:
         post_to_discord(
             f"⚠️ **優惠監察機器人 LLM 錯誤** | {TODAY_SHORT}\n"
@@ -634,7 +770,7 @@ def main() -> None:
 
     # 步驟 6：發送至 Discord
     try:
-        message = build_discord_message(summary, stats)
+        message = build_discord_message(llm_data, stats)
         post_to_discord(message)
     except Exception as e:
         print(f"[ERROR] Discord 發送失敗：{e}")

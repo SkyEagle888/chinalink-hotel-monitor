@@ -4,6 +4,31 @@
 
 ---
 
+## 2026-06-06 | [T9.2 implementation + T9.1 verification]
+
+- **Scope**: docs/PLAN.md T9.1.x (verify) + T9.2.x (implement)
+- **Files modified**:
+  - `scrape_and_notify.py` — T9.2.1/2/3: structured LLM output
+  - `docs/PLAN.md` — marked T9.1.1, T9.1.2, T9.1.3, T9.2.1, T9.2.2, T9.2.3 as `[x]`
+- **Code changes (T9.2)**:
+  - **T9.2.1** [ACC-1]: `call_llm()` now uses `response_format={"type":"json_object"}` and returns `{"packages": [...], "excluded_count": int}` dict. JSON parse failures surface as `RuntimeError`.
+  - **T9.2.2** [ACC-1]: Removed brittle `count_hotel_packages` regex; `build_discord_message()` now reads `len(llm_data["packages"])`. New `_parse_llm_json()` helper normalizes fields (default `nights=1`, `validity="持續有效"`, `price="請查閱官網"`, etc.) and tolerates malformed responses.
+  - **T9.2.3** [ACC-4]: System prompt now mandates JSON output with explicit schema, and includes 4 few-shot examples (2 qualified hotel packages + 2 disqualified: concert, transport-only).
+  - New helpers `_render_package_block()` and `_render_packages_markdown()` reconstruct the SCOPE.md §7 Markdown format from JSON. Discord output format is **unchanged** (per AGENTS.md "DO NOT change Discord message structure without updating SCOPE.md §7").
+  - `main()` call order preserved: `scrape_all_pages → compute_hash → prefilter → call_llm → post_to_discord` (only the return type of `call_llm` changed).
+  - Added `import json` (stdlib only — no new dependencies).
+- **T9.1 verification**:
+  - Confirmed via `git log` that commit `8113ae7` (2026-06-06) already implemented T9.1.1 (`_is_page_stale` + early-stop in `scrape_all_pages`), T9.1.2 (`PROMO_STALE_DAYS=180` with env override), and T9.1.3 (`DYNAMIC_CLASS_PATTERN` decompose pre-hash). All 3 tasks now marked `[x]` in PLAN.md.
+- **Validation**:
+  - ✅ `python -m py_compile scrape_and_notify.py`
+  - ✅ Smoke test (synthetic JSON input): render output matches SCOPE.md §7 character-for-character (header emoji, per-package block, stats line, footer divider)
+  - ✅ Parse fallback test: missing/invalid fields default safely; invalid JSON raises `RuntimeError`
+- **Risk**: Medium — LLM models may need 1-2 runs to adapt to JSON-only output. Fallback chain still active; no model parameter changes. Discord format identical to v1.1, so no SCOPE.md §7 update needed.
+- **Rollback**: `git revert HEAD` (single-commit revert). Old text-summary `call_llm()` available in `8113ae7~1` and earlier.
+- **Note (stale docs)**: `docs/CONTEXT-MAP.md:43-44` still flags T9.1.1/T9.1.2 as outstanding — these warnings are stale and predate commit `8113ae7`. Per protocol, not auto-modifying CONTEXT-MAP; recommend manual refresh in next docs-sync session.
+
+---
+
 ## 2026-06-06 | [v1.2 enhancement proposal — scope expansion]
 
 - **Files updated**:
