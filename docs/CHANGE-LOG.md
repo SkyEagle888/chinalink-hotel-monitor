@@ -4,6 +4,44 @@
 
 ---
 
+## 2026-06-06 | [T9.6.x implementation — 穩健性與可觀測性]
+
+- **Scope**: docs/PLAN.md T9.6.1 / 9.6.2 / 9.6.3 / 9.6.4 / 9.6.5
+- **Files modified/created**:
+  - `scrape_and_notify.py` — T9.6.1/2/3/5 changes (retry, logger, diff, DRY_RUN)
+  - `.github/workflows/hotel-monitor.yml` — T9.6.4 split into 3 jobs with scoped permissions
+  - `tests/test_t9.py` — added 4 test classes (T9.6 regression suite)
+  - `docs/PLAN.md` — marked T9.6.1–5 as `[x]`
+  - `last_promos.json` — NEW runtime artifact (auto-created on first run)
+- **Code changes**:
+  - **T9.6.1** [ROB-1] `post_to_discord()` — exponential backoff retry: `DISCORD_RETRY_MAX=3` (env-tunable), `DISCORD_RETRY_BACKOFF=2` (wait = base**N seconds). Emits `discord.sent` (with `attempt`) on success, `discord.failed` (with `attempts`, `error`) on exhaustion, then re-raises original `RequestException`.
+  - **T9.6.2** [ROB-2] New `_log_event(event, **fields)` helper backed by `logging.getLogger("hotel_monitor")`. Emits JSON Lines with `ts` (UTC ISO-8601), `level`, `run_id` (UUID4 12-char), `event`, plus arbitrary fields. Hooked at: `run.start` (with `today_cn`, `dry_run`), `scrape.complete` (with `chars`/`pages`/`promos`), `scrape.diff` (with `added`/`removed`/URL samples), `llm.usage` (with `model`/`prompt_tokens`/`completion_tokens`/`total_tokens` from OpenAI `usage` object), `discord.sent`/`discord.failed`/`discord.dry_run`, `run.end`, `run.no_change`. New constants: `RUN_ID`, `_STRUCT_LOGGER`.
+  - **T9.6.3** [ROB-3] New `PROMOS_FILE = "last_promos.json"` (auto-persisted, additive — old `last_hash.txt` contract unchanged). New `load_last_promos()` / `save_last_promos()` / `compute_promo_diff(old, new)` (URL-set based, title-changes not counted) / `compute_per_page_hashes()` (SHA-256[:16] per page). `main()` saves promos on every terminal branch (success / prefilter-only / hash-saved). Diff logged via `scrape.diff` event — not added to Discord message (per AGENTS.md "DO NOT change Discord message structure without updating SCOPE.md §7").
+  - **T9.6.4** [ROB-4] Workflow restructured into 3 jobs: `monitor` (`contents: read`, `persist-credentials: false` — no push power), `commit-hash` (`contents: write`, separate job, depends on `monitor`), `evaluate` (read-only). State transfer via `actions/upload-artifact@v4` (last_hash.txt + last_promos.json) + `actions/download-artifact@v4` between jobs. Commit step unchanged (still `git add last_hash.txt last_promos.json` + `[skip ci]` message). Blast radius: scrape+LLM job can no longer push even if compromised.
+  - **T9.6.5** [ROB-6] New `DRY_RUN` constant: `os.environ.get("DRY_RUN", "").lower() in ("1","true","yes")`. `post_to_discord()` short-circuits at top — emits `discord.dry_run` event (with `length`, `preview`) and prints `[DRY_RUN]` line; no HTTP call. Test verifies `requests.post` is never called.
+- **Validation**:
+  - ✅ `python -m py_compile scrape_and_notify.py`
+  - ✅ `python -m unittest tests.test_t9` — **53 tests, 0 failures** (35 pre-existing + 18 new T9.6.x)
+  - ✅ `python -m evaluation.evaluate` — **20/20 (100% accuracy)** — no prefilter regression
+  - ✅ Workflow YAML parse — 3 jobs, scoped permissions (`monitor:read`, `commit-hash:write`, `evaluate:read`)
+- **New T9.6 test classes** (18 cases):
+  - `TestStructuredLogging` (3): JSON shape, unicode safety, RUN_ID format
+  - `TestPromoDiff` (9): added/removed/unchanged/title-change/roundtrip/missing-file/corrupt/non-list/per-page-format
+  - `TestDiscordRetry` (4): first-try success / 2-fail-then-succeed / exhausted-raises / exponential-wait-timing
+  - `TestDryRun` (2): skips-HTTP / env-var-parsing (`1`/`true`/`yes` vs `0`/`false`/empty)
+- **Performance**:
+  - Worst-case Discord send wall-time: ~2s + ~4s + ~8s = ~14s on 3 fails (acceptable; Discord Webhook 5xx is rare)
+  - `last_promos.json` size: ~3–5 KB (3 pages × ~15 promos). Committed alongside `last_hash.txt` — negligible impact on repo size.
+  - Structured log overhead: ~0.1ms per event (negligible vs ~1–3s scrape + ~1–3s LLM)
+- **Risk**: Low — all changes additive; no breaking changes to `main()` flow or Discord output format. Pre-existing T9.x contracts preserved. The new `commit-hash` job introduces an artifact upload/download step (free for public repos, <100KB artifacts) which adds ~1–2s to total workflow time.
+- **Rollback**: `git revert HEAD`. Each T9.6.x change is isolated; can be reverted individually by commit. `last_promos.json` will be missing on first run post-revert → `load_last_promos()` returns `[]` (harmless).
+- **Notes**:
+  - T9.6.4 uses GitHub's **job-level** permission scoping (the only mechanism GitHub Actions supports). True path-level `contents: write` would require a fine-grained PAT, which is out of scope per AGENTS.md "DO NOT add new dependencies without explicit approval". The current split-job approach is the standard GitHub-recommended mitigation.
+  - T9.6.3 does NOT add the diff to the Discord message body. This would require updating `docs/SCOPE.md §7`, which is reserved for canonical Discord format changes (per AGENTS.md protocol). The diff is available in the structured log (`scrape.diff` event) for future SRE observability.
+  - `DISCORD_RETRY_BACKOFF=2` is a deliberate choice: with 3 attempts the total wait time is 2s+4s = 6s, well within the 10-minute `timeout-minutes: 10` budget.
+
+---
+
 ## 2026-06-06 | [T9.3.x + T9.4.x + T9.5.x implementation]
 
 - **Scope**: docs/PLAN.md T9.3.1/2/3, T9.4.1/2/3, T9.5.1/2/3

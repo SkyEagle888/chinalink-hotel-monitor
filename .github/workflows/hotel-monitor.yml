@@ -2,23 +2,23 @@ name: 每日酒店套票監察 — 環島中港通
 
 on:
   schedule:
-    - cron: '0 1 * * *'
-  workflow_dispatch:
-
-permissions:
-  contents: write
+    - cron: '0 1 * * *'      # 09:00 HKT（UTC+8）= 01:00 UTC
+  workflow_dispatch:            # 手動觸發
 
 jobs:
   monitor:
     name: 抓取 → 預篩選 → 摘要 → 通知
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    permissions:
+      contents: read            # T9.6.4：限縮 — 監察 job 僅讀，無 push 權限
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
+          persist-credentials: false   # T9.6.4：不持久化 token 至 .git/config
 
       - name: Set up Python 3.12
         uses: actions/setup-python@v5
@@ -39,11 +39,42 @@ jobs:
           OPENROUTER_MODEL_TERTIARY:  ${{ vars.OPENROUTER_MODEL_TERTIARY }}
         run: python scrape_and_notify.py
 
-      - name: Commit updated hash
+      - name: Upload changed artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: hotel-monitor-state
+          path: |
+            last_hash.txt
+            last_promos.json
+          if-no-files-found: ignore
+          retention-days: 7
+
+  commit-hash:
+    name: 提交 last_hash.txt + last_promos.json
+    runs-on: ubuntu-latest
+    needs: monitor
+    permissions:
+      contents: write           # T9.6.4：僅此 job 持有寫權限
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Download state artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: hotel-monitor-state
+          path: .
+
+      - name: Commit updated state
         run: |
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add last_hash.txt
+          git add last_hash.txt last_promos.json
           git diff --staged --quiet || git commit -m "chore: update page hash [skip ci]"
           git push
 
@@ -52,6 +83,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     needs: []
+    permissions:
+      contents: read
     if: github.event_name == 'workflow_dispatch'
 
     steps:

@@ -39,7 +39,7 @@
 
 - ✅ `requirements.txt` — 3 packages, compatible with Python 3.12
 - ✅ `scrape_and_notify.py` — Python 3.12 syntax (py_compile equivalent)
-- ✅ `.github/workflows/hotel-monitor.yml` — valid YAML, cron + dispatch triggers
-- ⚠️ `scrape_and_notify.py:247` — FR-1.3 early-stop **NOT implemented** (scrapes all 3 pages regardless)
-- ⚠️ `scrape_and_notify.py:66` — `PROMO_STALE_DAYS=60` mismatches `SCOPE.md` FR-6.4 (180 days)
+- ✅ `.github/workflows/hotel-monitor.yml` — valid YAML, 3 jobs (monitor / commit-hash / evaluate) with scoped permissions
+- ✅ `scrape_and_notify.py` — T9.1.1/9.1.2/9.1.3 implemented (`_is_page_stale`, `PROMO_STALE_DAYS=180`, `DYNAMIC_CLASS_PATTERN` decompose)
+- ✅ `evaluation/evaluate.py` — 20/20 golden set (100% accuracy)
 - ⚠️ Hash sensitivity — see `ARCHITECTURE.md` Known Risks

@@ -58,8 +58,8 @@ No traditional database. In-memory per run:
 ## Business Rules
 - **Eligibility (ALL required)**: hotel stay ≥1 night + transport (bus/coach) + buffet OR breakfast
 - **Hard exclusions**: concerts, theme parks, pure-fare promos, top-up rewards, new-route launch
-- **Expiry**: end date in content < TODAY → expired; publish date > 60 days old w/o end date → stale
-  - ⚠️ SCOPE.md FR-6.4 specifies 180 days; code uses 60 — see CHANGE-LOG
+- **Expiry**: end date in content < TODAY → expired; publish date > 180 days old w/o end date → stale
+  - ✅ Aligned with `SCOPE.md` FR-6.4 (180 days) since commit `8113ae7`; env-tunable via `PROMO_STALE_DAYS`
 - **No-show tolerance**: page unchanged → 0 LLM calls; prefilter eliminates all → 0 LLM calls
 - **Output contract**: Discord message ≤2000 chars (truncated to 1950+ellipsis)
 

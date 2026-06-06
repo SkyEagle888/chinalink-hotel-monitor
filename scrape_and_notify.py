@@ -7,7 +7,10 @@
 import hashlib
 import json
 import os
+import sys
+import uuid
 import datetime
+import logging
 import time
 import re
 import requests
@@ -22,9 +25,12 @@ from openai import OpenAI
 BASE_URL = "https://www.tilchinalink.com/promotions.php"
 MAX_PAGES = 3
 HASH_FILE = "last_hash.txt"
+PROMOS_FILE = "last_promos.json"
 TODAY = datetime.date.today()
 TODAY_CN = TODAY.strftime("%Y年%m月%d日")
 TODAY_SHORT = TODAY.strftime("%d/%m/%Y")
+
+RUN_ID = os.environ.get("RUN_ID", uuid.uuid4().hex[:12])
 
 API_KEY = os.environ.get("OPENROUTER_API_KEY", "")
 WEBHOOK_URL = os.environ.get("DISCORD_WEBHOOK_URL", "")
@@ -76,6 +82,9 @@ MAX_LLM_CHARS = 12000
 PROMO_STALE_DAYS = int(os.environ.get("PROMO_STALE_DAYS", "180"))
 SELF_CONSISTENCY_RUNS = int(os.environ.get("SELF_CONSISTENCY_RUNS", "2"))
 URL_RETRY_LIMIT = int(os.environ.get("URL_RETRY_LIMIT", "1"))
+DISCORD_RETRY_MAX = int(os.environ.get("DISCORD_RETRY_MAX", "3"))
+DISCORD_RETRY_BACKOFF = float(os.environ.get("DISCORD_RETRY_BACKOFF", "2"))
+DRY_RUN = os.environ.get("DRY_RUN", "").lower() in ("1", "true", "yes")
 
 DYNAMIC_CLASS_PATTERN = re.compile(
     r"^(ad|ads|ad-banner|ad-container|ad-wrapper|"
@@ -83,6 +92,36 @@ DYNAMIC_CLASS_PATTERN = re.compile(
     r"timestamp|last-updated|updated-at)$",
     re.I,
 )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 結構化日誌 (T9.6.2)
+# ─────────────────────────────────────────────────────────────────────────────
+
+_STRUCT_LOGGER = logging.getLogger("hotel_monitor")
+_STRUCT_LOGGER.setLevel(logging.INFO)
+if not _STRUCT_LOGGER.handlers:
+    _handler = logging.StreamHandler(sys.stdout)
+    _handler.setFormatter(logging.Formatter("%(message)s"))
+    _STRUCT_LOGGER.addHandler(_handler)
+    _STRUCT_LOGGER.propagate = False
+
+
+def _log_event(event: str, **fields) -> None:
+    """發送結構化 JSON 日誌事件 (T9.6.2)。
+
+    每行均含 `ts` / `level` / `run_id` / `event`，額外欄位可由 kwargs 注入。
+    """
+    payload = {
+        "ts": datetime.datetime.now(datetime.timezone.utc)
+        .isoformat(timespec="seconds")
+        .replace("+00:00", "Z"),
+        "level": "INFO",
+        "run_id": RUN_ID,
+        "event": event,
+        **fields,
+    }
+    _STRUCT_LOGGER.info(json.dumps(payload, ensure_ascii=False))
 
 SYSTEM_PROMPT = f"""你是一位專為香港用戶服務的旅遊套票分析師。
 今天的日期是 {TODAY_CN}。
@@ -569,6 +608,56 @@ def save_hash(hash_value: str) -> None:
         f.write(hash_value)
 
 
+def load_last_promos() -> list[dict]:
+    """載入上一輪抓取的優惠清單 (T9.6.3)。
+
+    若檔案不存在或解析失敗，回傳空清單（首次執行或檔案損毀時不視為錯誤）。
+    """
+    try:
+        with open(PROMOS_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if isinstance(data, list):
+            return data
+        return []
+    except (FileNotFoundError, json.JSONDecodeError):
+        return []
+
+
+def save_last_promos(promos: list[dict]) -> None:
+    """將本次抓取的優惠清單持久化，供下次比對。"""
+    with open(PROMOS_FILE, "w", encoding="utf-8") as f:
+        json.dump(promos, f, ensure_ascii=False)
+
+
+def compute_promo_diff(
+    old: list[dict], new: list[dict]
+) -> dict[str, list[str]]:
+    """比對兩輪抓取結果，回傳 {added, removed} URL 清單 (T9.6.3)。
+
+    比對鍵為 `url`（個別優惠的 `?id=XXX` 連結）。
+    同一 URL 但標題變更不視為新增/移除。
+    """
+    old_urls = {p.get("url", "") for p in old if p.get("url")}
+    new_urls = {p.get("url", "") for p in new if p.get("url")}
+
+    added = sorted(new_urls - old_urls)
+    removed = sorted(old_urls - new_urls)
+    return {"added": added, "removed": removed}
+
+
+def compute_per_page_hashes(
+    pages: dict[int, str],
+) -> dict[int, str]:
+    """逐頁雜湊 (T9.6.3)，用於日誌觀測變更範圍。
+
+    回傳 `{page_num: sha256[:16]}`。
+    """
+    return {
+        page: hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
+        for page, text in pages.items()
+    }
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # LLM 摘要
 # ─────────────────────────────────────────────────────────────────────────────
@@ -650,6 +739,15 @@ def _call_single_run(content: str) -> dict:
             )
             raw = response.choices[0].message.content.strip()
             print(f"[INFO] 成功使用模型：{model}")
+            usage = getattr(response, "usage", None)
+            if usage is not None:
+                _log_event(
+                    "llm.usage",
+                    model=model,
+                    prompt_tokens=getattr(usage, "prompt_tokens", None),
+                    completion_tokens=getattr(usage, "completion_tokens", None),
+                    total_tokens=getattr(usage, "total_tokens", None),
+                )
             return _parse_llm_json(raw)
         except Exception as e:
             print(f"[WARN] 模型 {model} 失敗：{e}")
@@ -760,7 +858,23 @@ def _parse_llm_json(raw: str) -> dict:
 # ─────────────────────────────────────────────────────────────────────────────
 
 def post_to_discord(message: str) -> None:
-    """透過 Incoming Webhook 向 Discord 發送訊息。"""
+    """透過 Incoming Webhook 向 Discord 發送訊息。
+
+    - T9.6.5 `DRY_RUN=true` 環境變量：記錄但實際不發送
+    - T9.6.1 重試：`DISCORD_RETRY_MAX` 次，exponential backoff
+      （基礎 = `DISCORD_RETRY_BACKOFF`，第 N 次等待 = base ** N 秒）
+    """
+    if DRY_RUN:
+        _log_event(
+            "discord.dry_run",
+            length=len(message),
+            preview=message[:200],
+        )
+        print(
+            f"[DRY_RUN] Discord 訊息（{len(message)} 字元）已記錄但未發送"
+        )
+        return
+
     if len(message) > 1950:
         message = message[:1947] + "..."
 
@@ -768,9 +882,43 @@ def post_to_discord(message: str) -> None:
         "username": "🏨 酒店套票機器人",
         "content": message,
     }
-    response = requests.post(WEBHOOK_URL, json=payload, timeout=10)
-    response.raise_for_status()
-    print(f"[INFO] Discord 通知已發送（{len(message)} 字元）")
+
+    last_error: Exception | None = None
+    for attempt in range(1, DISCORD_RETRY_MAX + 1):
+        try:
+            response = requests.post(
+                WEBHOOK_URL, json=payload, timeout=10
+            )
+            response.raise_for_status()
+            _log_event(
+                "discord.sent",
+                length=len(message),
+                attempt=attempt,
+            )
+            print(
+                f"[INFO] Discord 通知已發送（{len(message)} 字元，"
+                f"attempt={attempt}）"
+            )
+            return
+        except requests.RequestException as e:
+            last_error = e
+            wait = DISCORD_RETRY_BACKOFF ** attempt
+            print(
+                f"[WARN] Discord 發送失敗 "
+                f"（attempt={attempt}/{DISCORD_RETRY_MAX}）：{e}。"
+                f"等待 {wait:.1f}s 重試"
+            )
+            if attempt < DISCORD_RETRY_MAX:
+                time.sleep(wait)
+
+    _log_event(
+        "discord.failed",
+        attempts=DISCORD_RETRY_MAX,
+        error=str(last_error),
+    )
+    raise last_error if last_error else RuntimeError(
+        "Discord 發送失敗：未知錯誤"
+    )
 
 
 def _render_package_block(pkg: dict) -> str:
@@ -897,6 +1045,7 @@ def build_discord_message(llm_data: dict, stats: dict) -> str:
 
 def main() -> None:
     print(f"[INFO] 啟動酒店套票監察系統 — {TODAY_CN}")
+    _log_event("run.start", today_cn=TODAY_CN, dry_run=DRY_RUN)
 
     # 步驟 1：抓取
     try:
@@ -906,7 +1055,14 @@ def main() -> None:
             f"共 {pages_scanned} 頁，"
             f"解析到 {len(all_promotions)} 個優惠"
         )
+        _log_event(
+            "scrape.complete",
+            chars=len(raw_text),
+            pages=pages_scanned,
+            promos=len(all_promotions),
+        )
     except Exception as e:
+        _log_event("scrape.failed", error=str(e))
         post_to_discord(
             f"⚠️ **優惠監察機器人錯誤** | {TODAY_SHORT}\n"
             f"抓取失敗：`{e}`\n"
@@ -935,10 +1091,23 @@ def main() -> None:
             f"🔗 查閱所有優惠 → "
             f"https://www.tilchinalink.com/promotions.php"
         )
+        _log_event("run.no_change", pages=pages_scanned)
         print("[INFO] 無變更，提前退出。")
         return
 
     print("[INFO] 頁面內容已更新 — 進行預篩選")
+
+    # T9.6.3：計算逐頁雜湊 + 優惠 diff
+    last_promos = load_last_promos()
+    if last_promos or all_promotions:
+        diff = compute_promo_diff(last_promos, all_promotions)
+        _log_event(
+            "scrape.diff",
+            added=len(diff["added"]),
+            removed=len(diff["removed"]),
+            added_urls=diff["added"][:5],
+            removed_urls=diff["removed"][:5],
+        )
 
     # 步驟 3：程序化預篩選
     if all_promotions:
@@ -966,6 +1135,7 @@ def main() -> None:
         # 步驟 4c：預篩選已排除所有優惠 → 跳過 LLM
         post_to_discord(build_no_packages_message(pre_excluded, stats))
         save_hash(current_hash)
+        save_last_promos(all_promotions)
         print("[INFO] 預篩選已排除所有優惠，跳過 LLM。")
         return
 
@@ -989,6 +1159,13 @@ def main() -> None:
 
     # 步驟 7：儲存新雜湊值
     save_hash(current_hash)
+    save_last_promos(all_promotions)
+    _log_event(
+        "run.end",
+        pre_filtered=stats["pre_filtered"],
+        llm_candidates=stats["llm_candidates"],
+        hotel_count=len(llm_data.get("packages", [])),
+    )
     print("[INFO] 雜湊值已更新。執行完成。")
 
 

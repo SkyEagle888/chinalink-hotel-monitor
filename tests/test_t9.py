@@ -6,10 +6,15 @@ T9.3.x / T9.4.x / T9.5.x 煙霧測試（T9 增強迭代）
 """
 
 import json
+import logging
 import os
 import sys
+import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
+
+import requests
 
 if sys.platform == "win32":
     sys.stdout.reconfigure(encoding="utf-8")
@@ -295,6 +300,261 @@ class TestConstants(unittest.TestCase):
     def test_hotel_keywords_include_fang(self):
         for kw in ["住宿", "入住", "房間", "房"]:
             self.assertIn(kw, san.HOTEL_KEYWORDS)
+
+
+class TestStructuredLogging(unittest.TestCase):
+    """T9.6.2：結構化 JSON 日誌。"""
+
+    def setUp(self):
+        self.records: list[str] = []
+
+        class _Capture(logging.Handler):
+            def emit(self, record):
+                self.records.append(self.format(record))
+
+        self._capture = _Capture()
+        self._capture.setFormatter(logging.Formatter("%(message)s"))
+        self._capture.records = self.records
+        san._STRUCT_LOGGER.addHandler(self._capture)
+
+    def tearDown(self):
+        san._STRUCT_LOGGER.removeHandler(self._capture)
+
+    def _emitted(self) -> list[dict]:
+        out = []
+        for line in self.records:
+            try:
+                out.append(json.loads(line))
+            except json.JSONDecodeError:
+                pass
+        return out
+
+    def test_log_event_emits_json(self):
+        san._log_event("test.event", foo="bar", n=1)
+        events = self._emitted()
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0]["event"], "test.event")
+        self.assertEqual(events[0]["foo"], "bar")
+        self.assertEqual(events[0]["n"], 1)
+        self.assertEqual(events[0]["run_id"], san.RUN_ID)
+        self.assertEqual(events[0]["level"], "INFO")
+        self.assertIn("ts", events[0])
+
+    def test_log_event_extra_fields_unicode(self):
+        san._log_event("test.unicode", msg="繁體中文 — 套票")
+        events = self._emitted()
+        self.assertEqual(events[0]["msg"], "繁體中文 — 套票")
+
+    def test_run_id_default_uuid(self):
+        self.assertEqual(len(san.RUN_ID), 12)
+        self.assertTrue(all(c in "0123456789abcdef" for c in san.RUN_ID))
+
+
+class TestPromoDiff(unittest.TestCase):
+    """T9.6.3：promo 持久化 + diff 計算。"""
+
+    def setUp(self):
+        self._tmpdir = Path(tempfile.mkdtemp())
+        self._orig_promos_file = san.PROMOS_FILE
+        san.PROMOS_FILE = str(self._tmpdir / "last_promos.json")
+
+    def tearDown(self):
+        san.PROMOS_FILE = self._orig_promos_file
+        for f in self._tmpdir.iterdir():
+            f.unlink()
+        self._tmpdir.rmdir()
+
+    def test_diff_added_only(self):
+        old = [{"url": "https://x.com/?id=1", "title": "A"}]
+        new = [
+            {"url": "https://x.com/?id=1", "title": "A"},
+            {"url": "https://x.com/?id=2", "title": "B"},
+        ]
+        diff = san.compute_promo_diff(old, new)
+        self.assertEqual(diff["added"], ["https://x.com/?id=2"])
+        self.assertEqual(diff["removed"], [])
+
+    def test_diff_removed_only(self):
+        old = [
+            {"url": "https://x.com/?id=1", "title": "A"},
+            {"url": "https://x.com/?id=2", "title": "B"},
+        ]
+        new = [{"url": "https://x.com/?id=1", "title": "A"}]
+        diff = san.compute_promo_diff(old, new)
+        self.assertEqual(diff["added"], [])
+        self.assertEqual(diff["removed"], ["https://x.com/?id=2"])
+
+    def test_diff_unchanged(self):
+        old = [{"url": "https://x.com/?id=1", "title": "A"}]
+        new = [{"url": "https://x.com/?id=1", "title": "A"}]
+        diff = san.compute_promo_diff(old, new)
+        self.assertEqual(diff["added"], [])
+        self.assertEqual(diff["removed"], [])
+
+    def test_diff_title_change_not_counted(self):
+        """同一 URL 標題變更不視為新增/移除。"""
+        old = [{"url": "https://x.com/?id=1", "title": "舊標題"}]
+        new = [{"url": "https://x.com/?id=1", "title": "新標題"}]
+        diff = san.compute_promo_diff(old, new)
+        self.assertEqual(diff["added"], [])
+        self.assertEqual(diff["removed"], [])
+
+    def test_save_and_load_roundtrip(self):
+        promos = [
+            {"url": "https://x.com/?id=1", "title": "A"},
+            {"url": "https://x.com/?id=2", "title": "B"},
+        ]
+        san.save_last_promos(promos)
+        loaded = san.load_last_promos()
+        self.assertEqual(loaded, promos)
+
+    def test_load_missing_file_returns_empty(self):
+        self.assertEqual(san.load_last_promos(), [])
+
+    def test_load_corrupt_json_returns_empty(self):
+        (self._tmpdir / "last_promos.json").write_text("not json{", encoding="utf-8")
+        self.assertEqual(san.load_last_promos(), [])
+
+    def test_load_non_list_returns_empty(self):
+        (self._tmpdir / "last_promos.json").write_text('{"foo": 1}', encoding="utf-8")
+        self.assertEqual(san.load_last_promos(), [])
+
+    def test_per_page_hashes_format(self):
+        pages = {1: "page one text", 2: "page two text"}
+        hashes = san.compute_per_page_hashes(pages)
+        self.assertEqual(set(hashes.keys()), {1, 2})
+        for h in hashes.values():
+            self.assertEqual(len(h), 16)
+
+
+class TestDiscordRetry(unittest.TestCase):
+    """T9.6.1：Discord Webhook 重試 + exponential backoff。"""
+
+    def setUp(self):
+        self._orig_dry = san.DRY_RUN
+        self._orig_max = san.DISCORD_RETRY_MAX
+        self._orig_backoff = san.DISCORD_RETRY_BACKOFF
+        self._orig_url = san.WEBHOOK_URL
+        san.DRY_RUN = False
+        san.DISCORD_RETRY_MAX = 3
+        san.DISCORD_RETRY_BACKOFF = 1
+        san.WEBHOOK_URL = "https://test.webhook"
+        self.events: list[str] = []
+
+        class _Capture(logging.Handler):
+            def emit(self, record):
+                self.events.append(record.getMessage())
+
+        self._capture = _Capture()
+        self._capture.events = self.events
+        san._STRUCT_LOGGER.addHandler(self._capture)
+
+    def tearDown(self):
+        san.DRY_RUN = self._orig_dry
+        san.DISCORD_RETRY_MAX = self._orig_max
+        san.DISCORD_RETRY_BACKOFF = self._orig_backoff
+        san.WEBHOOK_URL = self._orig_url
+        san._STRUCT_LOGGER.removeHandler(self._capture)
+
+    def _events_of(self, name: str) -> list[dict]:
+        return [
+            json.loads(line) for line in self.events
+            if line.startswith("{") and f'"event": "{name}"' in line
+        ]
+
+    def test_succeeds_on_first_try(self):
+        with mock.patch("scrape_and_notify.requests.post") as mp:
+            mp.return_value.status_code = 204
+            san.post_to_discord("hello")
+            self.assertEqual(mp.call_count, 1)
+        sent = self._events_of("discord.sent")
+        self.assertEqual(len(sent), 1)
+        self.assertEqual(sent[0]["attempt"], 1)
+
+    def test_retry_then_succeed(self):
+        with mock.patch("scrape_and_notify.requests.post") as mp:
+            mp.side_effect = [
+                requests.ConnectionError("net1"),
+                requests.ConnectionError("net2"),
+                mock.Mock(status_code=204),
+            ]
+            with mock.patch("scrape_and_notify.time.sleep") as sleep:
+                san.post_to_discord("hello")
+                self.assertEqual(mp.call_count, 3)
+                self.assertEqual(sleep.call_count, 2)
+        sent = self._events_of("discord.sent")
+        self.assertEqual(len(sent), 1)
+        self.assertEqual(sent[0]["attempt"], 3)
+
+    def test_retry_exhausted_raises(self):
+        with mock.patch("scrape_and_notify.requests.post") as mp:
+            mp.side_effect = requests.ConnectionError("net")
+            with mock.patch("scrape_and_notify.time.sleep"):
+                with self.assertRaises(requests.ConnectionError):
+                    san.post_to_discord("hello")
+                self.assertEqual(mp.call_count, san.DISCORD_RETRY_MAX)
+        failed = self._events_of("discord.failed")
+        self.assertEqual(len(failed), 1)
+        self.assertEqual(failed[0]["attempts"], san.DISCORD_RETRY_MAX)
+
+    def test_exponential_backoff_timing(self):
+        """第 N 次失敗後等待 base**N 秒。"""
+        san.DISCORD_RETRY_BACKOFF = 2
+        with mock.patch("scrape_and_notify.requests.post") as mp:
+            mp.side_effect = requests.ConnectionError("net")
+            with mock.patch("scrape_and_notify.time.sleep") as sleep:
+                with self.assertRaises(requests.ConnectionError):
+                    san.post_to_discord("hello")
+            waits = [c.args[0] for c in sleep.call_args_list]
+            self.assertEqual(waits, [2, 4])
+
+
+class TestDryRun(unittest.TestCase):
+    """T9.6.5：DRY_RUN 環境變量支持。"""
+
+    def setUp(self):
+        self._orig_dry = san.DRY_RUN
+        self.events: list[str] = []
+
+        class _Capture(logging.Handler):
+            def emit(self, record):
+                self.events.append(record.getMessage())
+
+        self._capture = _Capture()
+        self._capture.events = self.events
+        san._STRUCT_LOGGER.addHandler(self._capture)
+
+    def tearDown(self):
+        san.DRY_RUN = self._orig_dry
+        san._STRUCT_LOGGER.removeHandler(self._capture)
+
+    def _events_of(self, name: str) -> list[dict]:
+        return [
+            json.loads(line) for line in self.events
+            if line.startswith("{") and f'"event": "{name}"' in line
+        ]
+
+    def test_dry_run_skips_http(self):
+        san.DRY_RUN = True
+        with mock.patch("scrape_and_notify.requests.post") as mp:
+            san.post_to_discord("test message")
+            self.assertEqual(mp.call_count, 0)
+        dry = self._events_of("discord.dry_run")
+        self.assertEqual(len(dry), 1)
+        self.assertEqual(dry[0]["length"], len("test message"))
+
+    def test_dry_run_env_var_parsing(self):
+        for true_val in ("1", "true", "TRUE", "yes", "Yes"):
+            os.environ["DRY_RUN"] = true_val
+            self.assertTrue(_parse_dry_run_env())
+        for false_val in ("0", "false", "no", "", "anything"):
+            os.environ["DRY_RUN"] = false_val
+            self.assertFalse(_parse_dry_run_env())
+        os.environ.pop("DRY_RUN", None)
+
+
+def _parse_dry_run_env() -> bool:
+    return os.environ.get("DRY_RUN", "").lower() in ("1", "true", "yes")
 
 
 if __name__ == "__main__":

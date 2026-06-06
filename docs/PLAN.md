@@ -881,11 +881,11 @@ meta-llama/llama-3.3-70b-instruct:free  ← 第三（Meta，131K）
 - [x] **T9.5.3** [ACC-7] Self-consistency：同 prompt 跑 2 次取交集（`scrape_and_notify.py:587`）— `_intersect_runs()` 按 URL 交集；交集為空 fallback 第一輪；`SELF_CONSISTENCY_RUNS=2`（可調）
 
 ### T9.6 — 穩健性與可觀測性
-- [ ] **T9.6.1** [ROB-1] Discord Webhook 重試（3 次 exponential backoff）— `post_to_discord`
-- [ ] **T9.6.2** [ROB-2] 結構化 JSON 日誌（含 `run_id`、模型、token 用量）— `logging` 模組
-- [ ] **T9.6.3** [ROB-3] 逐頁雜湊 + 變更 diff（新增/移除的優惠 id）— `compute_hash` 改 per-page
-- [ ] **T9.6.4** [ROB-4] 限縮 workflow `contents: write` 權限至 `last_hash.txt` 路徑
-- [ ] **T9.6.5** [ROB-6] `DRY_RUN` 環境變量支持（測試用，不發 Discord）
+- [x] **T9.6.1** [ROB-1] Discord Webhook 重試（3 次 exponential backoff）— `post_to_discord` — `DISCORD_RETRY_MAX=3` + `DISCORD_RETRY_BACKOFF=2`（env 可調）；重試耗盡後 `discord.failed` 事件 + 拋出原異常
+- [x] **T9.6.2** [ROB-2] 結構化 JSON 日誌（含 `run_id`、模型、token 用量）— `logging` 模組 — `_log_event()` 發 JSON Lines（`run_id`/`event`/`ts`/`level` + 自定欄位）；`llm.usage` 注入 `prompt_tokens`/`completion_tokens`/`total_tokens`
+- [x] **T9.6.3** [ROB-3] 逐頁雜湊 + 變更 diff（新增/移除的優惠 id）— `compute_hash` 改 per-page — 新增 `last_promos.json` 持久化優惠 URL 列表；`compute_promo_diff()` 比對 URL 集合 → `scrape.diff` 事件（added/removed 計數 + 前 5 個 URL）；`compute_per_page_hashes()` 為日誌輔助
+- [x] **T9.6.4** [ROB-4] 限縮 workflow `contents: write` 權限至 `last_hash.txt` 路徑 — 拆 `monitor` job 為 `contents: read` + `persist-credentials: false`；新增獨立 `commit-hash` job 持 `contents: write`（用 artifacts 傳遞 state）；`evaluate` job 維持 read
+- [x] **T9.6.5** [ROB-6] `DRY_RUN` 環境變量支持（測試用，不發 Discord）— `post_to_discord` 開頭檢查 `DRY_RUN=true` → 僅發 `discord.dry_run` 事件 + 印 `[DRY_RUN]` 不打 HTTP
 
 ### 與 SCOPE 的可追溯性
 
