@@ -849,4 +849,69 @@ meta-llama/llama-3.3-70b-instruct:free  ← 第三（Meta，131K）
 
 ---
 
+## T9 — 增強迭代（v1.2 提案）
+
+> **狀態**：提案階段，與 `docs/SCOPE.md` §10 對應  
+> **驗證標準**：所有任務完成後須有 Discord 輸出對比 + 評估集分數提升證據  
+> **Checkbox 約定**：`[x]` = 已實作且通過驗證；`[ ]` = 待實作或未驗證
+
+### T9.1 — 缺陷修正（🔴 必修）
+- [ ] **T9.1.1** [BUG-1] 實作 FR-1.3 早停：抓取後比對當前頁最新發布日期，若全部 >180 天則 `break`（`scrape_and_notify.py:247`）
+- [ ] **T9.1.2** [BUG-2] 統一 `PROMO_STALE_DAYS=180` 並支援環境變量覆寫（`scrape_and_notify.py:66`）
+- [ ] **T9.1.3** [BUG-3 / EFF-2] 雜湊前內容歸一化：移除 `<div class="ad">`、view counter、隨機 ID 後再 hash
+
+### T9.2 — 結構化 LLM 輸出
+- [ ] **T9.2.1** [ACC-1] 切換至 JSON schema 模式（`response_format={"type":"json_schema", ...}`）
+- [ ] **T9.2.2** [ACC-1] 替換 `count_hotel_packages` regex 為 JSON 解析（`scrape_and_notify.py:427`）
+- [ ] **T9.2.3** [ACC-4] 注入 few-shot 範本（2 合格 + 2 誤判）至 system prompt
+
+### T9.3 — 過濾與日期強化
+- [ ] **T9.3.1** [ACC-2] 擴展 `extract_end_dates` regex 覆蓋「即日起」「至X月X日」（無年）slash 格式（`scrape_and_notify.py:134`）
+- [ ] **T9.3.2** [ACC-3] 加入正向白名單：「住宿」「入住」「房間」必須至少一項出現，否則排除
+- [ ] **T9.3.3** [ACC-5] 輸出驗證層：解析後確認 `?id=XXX` URL 存在，否則重試或標記警告
+
+### T9.4 — 效率提升
+- [ ] **T9.4.1** [EFF-1] 改 `scrape_all_pages` 為 `ThreadPoolExecutor` 並行抓取（`max_workers=3`）
+- [ ] **T9.4.2** [EFF-3] 早停邏輯整合至 `scrape_all_pages` 迴圈
+- [ ] **T9.4.3** [EFF-4] 啟發式第二輪篩選：候選 ≥3 時僅送「住宿+餐飲」雙關鍵字命中者
+
+### T9.5 — 評估基礎設施
+- [ ] **T9.5.1** [ACC-6] 建立評估集（黃金 20 條）：人工標註 20 條真實優惠
+- [ ] **T9.5.2** [ACC-6] GitHub Action 評估 job：每日 / 每 PR 跑評估，輸出分數至 workflow log
+- [ ] **T9.5.3** [ACC-7] Self-consistency：同 prompt 跑 2 次取交集
+
+### T9.6 — 穩健性與可觀測性
+- [ ] **T9.6.1** [ROB-1] Discord Webhook 重試（3 次 exponential backoff）— `post_to_discord`
+- [ ] **T9.6.2** [ROB-2] 結構化 JSON 日誌（含 `run_id`、模型、token 用量）— `logging` 模組
+- [ ] **T9.6.3** [ROB-3] 逐頁雜湊 + 變更 diff（新增/移除的優惠 id）— `compute_hash` 改 per-page
+- [ ] **T9.6.4** [ROB-4] 限縮 workflow `contents: write` 權限至 `last_hash.txt` 路徑
+- [ ] **T9.6.5** [ROB-6] `DRY_RUN` 環境變量支持（測試用，不發 Discord）
+
+### 與 SCOPE 的可追溯性
+
+| SCOPE ID | PLAN 任務 | 優先級 |
+|---|---|---|
+| BUG-1 | T9.1.1 | 🔴 必修 |
+| BUG-2 | T9.1.2 | 🔴 必修 |
+| BUG-3 / EFF-2 | T9.1.3 | 🔴 必修 |
+| EFF-1 | T9.4.1 | 🟡 中 |
+| EFF-3 | T9.4.2 | 🟡 高 |
+| EFF-4 | T9.4.3 | 🟢 低 |
+| ACC-1 | T9.2.1, T9.2.2 | 🟡 高 |
+| ACC-2 | T9.3.1 | 🟡 高 |
+| ACC-3 | T9.3.2 | 🟡 高 |
+| ACC-4 | T9.2.3 | 🟡 中 |
+| ACC-5 | T9.3.3 | 🟡 中 |
+| ACC-6 | T9.5.1, T9.5.2 | 🟡 高 |
+| ACC-7 | T9.5.3 | 🟢 低 |
+| ROB-1 | T9.6.1 | 🟡 中 |
+| ROB-2 | T9.6.2 | 🟢 低 |
+| ROB-3 | T9.6.3 | 🟢 低 |
+| ROB-4 | T9.6.4 | 🟡 中 |
+| ROB-6 | T9.6.5 | 🟢 低 |
+
+> **未列入 T9（已剔除/低 ROI）**：EFF-5（並行模型 first-wins）、EFF-6（hash 快取）、ROB-5（週報）。可在 v1.3 再評估。
+
+---
+
 *版本 1.2 | 27 April 2026 | 環島中港通酒店套票監察系統 | Henry Fok / Legato Technologies Limited*

@@ -63,7 +63,14 @@ EXCLUDE_KEYWORDS = [
 ]
 
 MAX_LLM_CHARS = 12000
-PROMO_STALE_DAYS = 60
+PROMO_STALE_DAYS = int(os.environ.get("PROMO_STALE_DAYS", "180"))
+
+DYNAMIC_CLASS_PATTERN = re.compile(
+    r"^(ad|ads|ad-banner|ad-container|ad-wrapper|"
+    r"counter|view-count|view-counter|page-views|"
+    r"timestamp|last-updated|updated-at)$",
+    re.I,
+)
 
 SYSTEM_PROMPT = f"""你是一位專為香港用戶服務的旅遊套票分析師。
 今天的日期是 {TODAY_CN}。
@@ -234,8 +241,27 @@ def fetch_page(page_num: int) -> tuple[str, list[dict]]:
     ):
         unwanted.decompose()
 
+    for el in soup.find_all(class_=DYNAMIC_CLASS_PATTERN):
+        el.decompose()
+
     text = soup.get_text(separator="\n", strip=True)
     return text, promotions
+
+
+def _is_page_stale(promos: list[dict]) -> bool:
+    """整頁所有有日期的優惠均早於 PROMO_STALE_DAYS 天則視為過期。"""
+    dated: list[datetime.date] = []
+    for p in promos:
+        ds = p.get("date", "")
+        if not ds:
+            continue
+        try:
+            dated.append(datetime.datetime.strptime(ds, "%Y-%m-%d").date())
+        except ValueError:
+            continue
+    if not dated:
+        return False
+    return (TODAY - max(dated)).days > PROMO_STALE_DAYS
 
 
 def scrape_all_pages() -> tuple[str, list[dict], int]:
@@ -251,6 +277,12 @@ def scrape_all_pages() -> tuple[str, list[dict], int]:
             all_promotions.extend(promos)
             pages_scanned += 1
             time.sleep(1.5)
+            if _is_page_stale(promos):
+                print(
+                    f"[INFO] 第 {i} 頁全部優惠早於 "
+                    f"{PROMO_STALE_DAYS} 天，停止翻頁 (FR-1.3)"
+                )
+                break
         except requests.RequestException as e:
             if i == 1:
                 raise

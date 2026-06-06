@@ -300,4 +300,72 @@ OpenRouter 免費模型限制：每分鐘 20 個請求，每日 200 個請求。
 
 ---
 
+## 10. 增強提案（v1.2 — 待實作）
+
+> **狀態**：提案，尚未實作。基於 2026-06-06 代碼審查。  
+> **範圍**：附加層，不取代 §4 FR-1 至 FR-6 既有需求。  
+> **實作任務**：見 `docs/PLAN.md` T9。
+
+### 10.1 已知缺陷修正（🔴 必修）
+
+| ID | 來源 | 問題 | 修正方向 |
+|---|---|---|---|
+| BUG-1 | FR-1.3 | 早停邏輯未實作（`scrape_and_notify.py:247`），永遠抓滿 3 頁 | 抓取後比對頁面最新發布日，若全部 >180 天則 `break` |
+| BUG-2 | FR-6.4 | `PROMO_STALE_DAYS=60` 與本節規定 180 天不一致 | 統一為 180 天並透過環境變量可調 |
+| BUG-3 | FR-2.1 | 雜湊前未歸一化（廣告/計數器/隨機 ID 觸發重跑） | strip 動態元素後再 hash |
+
+### 10.2 效率增強（EFF）
+
+| ID | 需求 | 預期效益 |
+|---|---|---|
+| EFF-1 | `ThreadPoolExecutor` 並行抓取 3 頁 | 抓取時間 ~3s → ~1.5s |
+| EFF-2 | 雜湊前內容歸一化（去廣告、計數器、隨機 id） | 降低假陽性觸發 LLM |
+| EFF-3 | 早停：當前頁所有優惠 >180 天則停止翻頁 | 實作 BUG-1 + 節省 token |
+| EFF-4 | 候選 ≥3 時啟發式第二輪篩選（雙關鍵字命中） | 多數日子維持 0–1 API 調用 |
+| EFF-5 | 模型並行 + 首響應採納（fallback 改 first-wins） | 主要模型慢時不延遲 |
+| EFF-6 | LLM 結果按 `hash(內容)` 快取 | 重跑時免費 |
+
+### 10.3 準確度增強（ACC）
+
+| ID | 需求 | 預期效益 |
+|---|---|---|
+| ACC-1 | LLM 切換至 JSON schema 結構化輸出 | 消除 `count_hotel_packages` 脆弱 regex（`scrape_and_notify.py:427`） |
+| ACC-2 | 擴展 `extract_end_dates` regex 覆蓋「即日起」+ 無年 + slash 格式 | 減少漏抓「無年結束日」優惠 |
+| ACC-3 | 反向白名單：「住宿」「入住」「房間」必須出現才算酒店類 | 抑制「酒店名僅為站點」的誤判 |
+| ACC-4 | system prompt 注入 2 合格 + 2 誤判 few-shot 範例 | 小模型分類精度提升 |
+| ACC-5 | 輸出驗證層：解析後確認 `?id=XXX` URL 存在，否則重試 | 捕捉 LLM 偶發遺漏 |
+| ACC-6 | 評估集（黃金 20 條）+ GitHub Action 評估 job | 可量化改進成效 |
+| ACC-7 | Self-consistency：同 prompt 跑 2 次取交集 | 過濾隨機錯誤 |
+
+### 10.4 穩健性 / 可觀測性增強（ROB）
+
+| ID | 需求 |
+|---|---|
+| ROB-1 | Discord Webhook 重試（exponential backoff, 3 次） |
+| ROB-2 | 結構化 JSON 日誌（含 `run_id`、模型、token 用量） |
+| ROB-3 | 逐頁雜湊 + 變更差異高亮（新增/移除的優惠 id） |
+| ROB-4 | 限縮 workflow `contents: write` 權限至 `last_hash.txt` 路徑 |
+| ROB-5 | 週報訊息：週日發 7 天命中率摘要至 Discord |
+| ROB-6 | `DRY_RUN=true` 環境變量支持（測試用，不發 Discord） |
+
+### 10.5 推薦實作順序
+
+| # | ID | 理由 |
+|---|---|---|
+| 1 | BUG-1 / BUG-2 / BUG-3 | 修正缺陷，消除已知漂移 |
+| 2 | ACC-1 + ACC-5 | 結構化輸出 + 驗證層，從根上改善解析 |
+| 3 | EFF-2 + EFF-3 | 雜湊歸一化 + 早停，最大 ROI |
+| 4 | ACC-6 | 評估集 + CI，建立可量化的改進基礎 |
+| 5 | ACC-2 / ACC-3 | 日期 regex 擴展 + 反向白名單 |
+| 6 | ROB-1 / ROB-2 | 重試 + 結構化日誌 |
+| 7 | EFF-4 / EFF-5 / EFF-6 / ROB-3..6 | 視 ROI 決定 |
+
+### 10.6 對既有章節的影響
+- §3 範圍定義不變（合資格/排除條件維持）
+- §4 FR-1 至 FR-6 維持 — 上述增強為附加層
+- §5 NFR 增加「可評估性」（ACC-6 評估集）維度
+- §7 Discord 訊息格式不變（除非 ACC-1 改 JSON 內部表示，不影響輸出）
+
+---
+
 *版本 1.1 | 27 April 2026 | 環島中港通酒店套票監察系統 | Henry Fok / Legato Technologies Limited*
