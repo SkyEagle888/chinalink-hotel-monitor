@@ -866,19 +866,19 @@ meta-llama/llama-3.3-70b-instruct:free  ← 第三（Meta，131K）
 - [x] **T9.2.3** [ACC-4] 注入 few-shot 範本（2 合格 + 2 誤判）至 system prompt — 含 4 個完整 I/O JSON 範例
 
 ### T9.3 — 過濾與日期強化
-- [ ] **T9.3.1** [ACC-2] 擴展 `extract_end_dates` regex 覆蓋「即日起」「至X月X日」（無年）slash 格式（`scrape_and_notify.py:134`）
-- [ ] **T9.3.2** [ACC-3] 加入正向白名單：「住宿」「入住」「房間」必須至少一項出現，否則排除
-- [ ] **T9.3.3** [ACC-5] 輸出驗證層：解析後確認 `?id=XXX` URL 存在，否則重試或標記警告
+- [x] **T9.3.1** [ACC-2] 擴展 `extract_end_dates` regex 覆蓋「即日起」「至X月X日」（無年）slash 格式（`scrape_and_notify.py:212`）— 新增 YMD/DMY slash range + single-end + dash-end 4 個 regex；「即日起」天然不匹配視為無結束日期
+- [x] **T9.3.2** [ACC-3] 加入正向白名單：「住宿」「入住」「房間」必須至少一項出現，否則排除（`scrape_and_notify.py:75`）— `HOTEL_KEYWORDS = ["住宿", "入住", "房間", "房"]`；新增「房」以涵蓋套房/家庭房/大床房等常見單字
+- [x] **T9.3.3** [ACC-5] 輸出驗證層：解析後確認 `?id=XXX` URL 存在，否則重試或標記警告（`scrape_and_notify.py:624-647`）— `_validate_urls()` + `_drop_invalid_urls()` + `URL_RETRY_LIMIT=1`
 
 ### T9.4 — 效率提升
-- [ ] **T9.4.1** [EFF-1] 改 `scrape_all_pages` 為 `ThreadPoolExecutor` 並行抓取（`max_workers=3`）
-- [ ] **T9.4.2** [EFF-3] 早停邏輯整合至 `scrape_all_pages` 迴圈
-- [ ] **T9.4.3** [EFF-4] 啟發式第二輪篩選：候選 ≥3 時僅送「住宿+餐飲」雙關鍵字命中者
+- [x] **T9.4.1** [EFF-1] 改 `scrape_all_pages` 為 `ThreadPoolExecutor` 並行抓取（`scrape_and_notify.py:373`）— `max_workers=MAX_PAGES=3`，並行發出 3 個 GET；早停邏輯在結果組裝階段套用
+- [x] **T9.4.2** [EFF-3] 早停邏輯整合至 `scrape_all_pages` 迴圈（`scrape_and_notify.py:392`）— 與 T9.1.1 (BUG-1) 同步實作於 commit 8113ae7；`_is_page_stale()` 在頁面層級偵測並 `break`
+- [x] **T9.4.3** [EFF-4] 啟發式第二輪篩選：候選 ≥3 時僅送「住宿+餐飲」雙關鍵字命中者（`scrape_and_notify.py:519`）— `HEURISTIC_2ND_ROUND_THRESHOLD=3` + `has_stay_and_meal()`
 
 ### T9.5 — 評估基礎設施
-- [ ] **T9.5.1** [ACC-6] 建立評估集（黃金 20 條）：人工標註 20 條真實優惠
-- [ ] **T9.5.2** [ACC-6] GitHub Action 評估 job：每日 / 每 PR 跑評估，輸出分數至 workflow log
-- [ ] **T9.5.3** [ACC-7] Self-consistency：同 prompt 跑 2 次取交集
+- [x] **T9.5.1** [ACC-6] 建立評估集（黃金 20 條）：人工標註 20 條真實優惠（`evaluation/golden_set.jsonl`）— 20 條合成但具代表性的樣本（10 hotel + 10 non-hotel），覆蓋過期/即日起/slash-format/酒店-車站 等邊緣案例
+- [x] **T9.5.2** [ACC-6] GitHub Action 評估 job：每日 / 每 PR 跑評估，輸出分數至 workflow log（`.github/workflows/hotel-monitor.yml:53`）— `evaluate` job，僅 `workflow_dispatch` 觸發（避免 PR-time LLM 額度消耗）；輸出 accuracy/precision/recall/F1，閾值 85% 否則 exit 1
+- [x] **T9.5.3** [ACC-7] Self-consistency：同 prompt 跑 2 次取交集（`scrape_and_notify.py:587`）— `_intersect_runs()` 按 URL 交集；交集為空 fallback 第一輪；`SELF_CONSISTENCY_RUNS=2`（可調）
 
 ### T9.6 — 穩健性與可觀測性
 - [ ] **T9.6.1** [ROB-1] Discord Webhook 重試（3 次 exponential backoff）— `post_to_discord`

@@ -11,6 +11,7 @@ import datetime
 import time
 import re
 import requests
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from bs4 import BeautifulSoup, Tag
 from openai import OpenAI
 
@@ -25,8 +26,8 @@ TODAY = datetime.date.today()
 TODAY_CN = TODAY.strftime("%Y年%m月%d日")
 TODAY_SHORT = TODAY.strftime("%d/%m/%Y")
 
-API_KEY = os.environ["OPENROUTER_API_KEY"]
-WEBHOOK_URL = os.environ["DISCORD_WEBHOOK_URL"]
+API_KEY = os.environ.get("OPENROUTER_API_KEY", "")
+WEBHOOK_URL = os.environ.get("DISCORD_WEBHOOK_URL", "")
 BASE_URL_API = os.environ.get(
     "OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1"
 )
@@ -61,10 +62,20 @@ EXCLUDE_KEYWORDS = [
     "充值優惠", "充值獎賞", "消費券", "現金回贈",
     "新增站點", "站點限定",
     "行李托運",
+    "表演套票", "表演門票",
+]
+
+HOTEL_KEYWORDS = ["住宿", "入住", "房間", "房"]
+STAY_KEYWORDS = ["住宿", "入住", "房間", "房", "晚"]
+MEAL_KEYWORDS = [
+    "自助餐", "自助早餐", "自助晚餐",
+    "早餐", "晚餐", "午宴", "Buffet", "buffet",
 ]
 
 MAX_LLM_CHARS = 12000
 PROMO_STALE_DAYS = int(os.environ.get("PROMO_STALE_DAYS", "180"))
+SELF_CONSISTENCY_RUNS = int(os.environ.get("SELF_CONSISTENCY_RUNS", "2"))
+URL_RETRY_LIMIT = int(os.environ.get("URL_RETRY_LIMIT", "1"))
 
 DYNAMIC_CLASS_PATTERN = re.compile(
     r"^(ad|ads|ad-banner|ad-container|ad-wrapper|"
@@ -194,7 +205,15 @@ def _safe_date(year: int, month: int, day: int) -> datetime.date | None:
 
 
 def extract_end_dates(text: str, ref_year: int) -> list[datetime.date]:
-    """從優惠內容提取所有結束日期。"""
+    """從優惠內容提取所有結束日期。
+
+    支援格式：
+      - YYYY年M月D日 至 YYYY年M月D日
+      - YYYY年M月D日 至 M月D日（無年，ref_year 推導）
+      - 至 YYYY年M月D日
+      - YYYY/MM/DD 或 DD/MM/YYYY（slash 格式）
+      - 至 YYYY-MM-DD（dash 格式，內容內）
+    """
     dates: list[datetime.date] = []
 
     for m in re.finditer(
@@ -224,6 +243,47 @@ def extract_end_dates(text: str, ref_year: int) -> list[datetime.date]:
 
     for m in re.finditer(
         r"[至到]\s*(\d{4})年(\d{1,2})月(\d{1,2})日", text
+    ):
+        d = _safe_date(int(m.group(1)), int(m.group(2)), int(m.group(3)))
+        if d:
+            dates.append(d)
+
+    for m in re.finditer(
+        r"(\d{4})/(\d{1,2})/(\d{1,2})"
+        r"\s*[至到\–\-~]\s*"
+        r"(\d{4})/(\d{1,2})/(\d{1,2})",
+        text,
+    ):
+        d = _safe_date(int(m.group(4)), int(m.group(5)), int(m.group(6)))
+        if d:
+            dates.append(d)
+
+    for m in re.finditer(
+        r"(\d{1,2})/(\d{1,2})/(\d{4})"
+        r"\s*[至到\–\-~]\s*"
+        r"(\d{1,2})/(\d{1,2})/(\d{4})",
+        text,
+    ):
+        d = _safe_date(int(m.group(6)), int(m.group(5)), int(m.group(4)))
+        if d:
+            dates.append(d)
+
+    for m in re.finditer(
+        r"[至到]\s*(\d{4})/(\d{1,2})/(\d{1,2})", text
+    ):
+        d = _safe_date(int(m.group(1)), int(m.group(2)), int(m.group(3)))
+        if d:
+            dates.append(d)
+
+    for m in re.finditer(
+        r"[至到]\s*(\d{1,2})/(\d{1,2})/(\d{4})", text
+    ):
+        d = _safe_date(int(m.group(3)), int(m.group(2)), int(m.group(1)))
+        if d:
+            dates.append(d)
+
+    for m in re.finditer(
+        r"[至到]\s*(\d{4})-(\d{1,2})-(\d{1,2})", text
     ):
         d = _safe_date(int(m.group(1)), int(m.group(2)), int(m.group(3)))
         if d:
@@ -320,28 +380,45 @@ def _is_page_stale(promos: list[dict]) -> bool:
 
 
 def scrape_all_pages() -> tuple[str, list[dict], int]:
-    """抓取第 1–MAX_PAGES 頁。回傳 (text, promotions, pages_scanned)。"""
+    """並行抓取第 1–MAX_PAGES 頁 (T9.4.1)。
+
+    使用 ThreadPoolExecutor 同時發出 3 個 GET 請求，最後依頁碼順序組裝並套用
+    早停邏輯 (T9.4.2 / FR-1.3)：若當前頁所有優惠均早於 PROMO_STALE_DAYS 天，
+    後續頁面雖已抓取亦不納入結果。
+
+    回傳 (text, promotions, pages_scanned)。
+    """
+    results: dict[int, tuple[str, list[dict]]] = {}
+
+    with ThreadPoolExecutor(max_workers=MAX_PAGES) as executor:
+        futures = {
+            executor.submit(fetch_page, i): i
+            for i in range(1, MAX_PAGES + 1)
+        }
+        for future in as_completed(futures):
+            page_num = futures[future]
+            try:
+                results[page_num] = future.result()
+            except requests.RequestException as e:
+                if page_num == 1:
+                    raise
+                print(f"[WARN] 第 {page_num} 頁抓取失敗：{e}")
+
     all_text: list[str] = []
     all_promotions: list[dict] = []
     pages_scanned = 0
 
-    for i in range(1, MAX_PAGES + 1):
-        try:
-            text, promos = fetch_page(i)
-            all_text.append(f"=== 優惠頁面 {i} ===\n{text}")
-            all_promotions.extend(promos)
-            pages_scanned += 1
-            time.sleep(1.5)
-            if _is_page_stale(promos):
-                print(
-                    f"[INFO] 第 {i} 頁全部優惠早於 "
-                    f"{PROMO_STALE_DAYS} 天，停止翻頁 (FR-1.3)"
-                )
-                break
-        except requests.RequestException as e:
-            if i == 1:
-                raise
-            print(f"[WARN] 第 {i} 頁抓取失敗：{e}")
+    for i in sorted(results.keys()):
+        text, promos = results[i]
+        all_text.append(f"=== 優惠頁面 {i} ===\n{text}")
+        all_promotions.extend(promos)
+        pages_scanned += 1
+        if _is_page_stale(promos):
+            print(
+                f"[INFO] 第 {i} 頁全部優惠早於 "
+                f"{PROMO_STALE_DAYS} 天，停止翻頁 (FR-1.3)"
+            )
+            break
 
     combined_text = "\n\n".join(all_text)
     return combined_text, all_promotions, pages_scanned
@@ -393,10 +470,34 @@ def is_obviously_non_hotel(promo: dict) -> bool:
     return False
 
 
+def has_hotel_keyword(promo: dict) -> bool:
+    """正向白名單：「住宿」「入住」「房間」至少一項出現。"""
+    combined = promo.get("title", "") + " " + promo.get("content", "")
+    return any(kw in combined for kw in HOTEL_KEYWORDS)
+
+
+def has_stay_and_meal(promo: dict) -> bool:
+    """T9.4.3 雙關鍵字命中：住宿 + 餐飲皆出現。"""
+    combined = promo.get("title", "") + " " + promo.get("content", "")
+    has_stay = any(kw in combined for kw in STAY_KEYWORDS)
+    has_meal = any(kw in combined for kw in MEAL_KEYWORDS)
+    return has_stay and has_meal
+
+
+HEURISTIC_2ND_ROUND_THRESHOLD = 3
+
+
 def prefilter(
     promotions: list[dict],
 ) -> tuple[list[dict], int]:
-    """程序化預篩選。回傳 (filtered_list, excluded_count)。"""
+    """程序化預篩選。回傳 (filtered_list, excluded_count)。
+
+    流程：
+      1. is_expired — 排除過期
+      2. is_obviously_non_hotel — 排除明確非酒店
+      3. has_hotel_keyword (T9.3.2) — 排除無住宿關鍵字
+      4. 候選 >= 3 → 啟發式第二輪 (T9.4.3) 雙關鍵字命中
+    """
     filtered: list[dict] = []
     excluded = 0
 
@@ -411,7 +512,23 @@ def prefilter(
             excluded += 1
             continue
 
+        if not has_hotel_keyword(promo):
+            print(f"[FILTER] 無住宿關鍵字：{promo['title'][:50]}")
+            excluded += 1
+            continue
+
         filtered.append(promo)
+
+    if len(filtered) >= HEURISTIC_2ND_ROUND_THRESHOLD:
+        round1_count = len(filtered)
+        round2 = [p for p in filtered if has_stay_and_meal(p)]
+        if len(round2) < round1_count:
+            print(
+                f"[FILTER] 啟發式第二輪：{round1_count} → {len(round2)} "
+                f"（雙關鍵字：住宿+餐飲）"
+            )
+            excluded += round1_count - len(round2)
+            filtered = round2
 
     return filtered, excluded
 
@@ -457,12 +574,57 @@ def save_hash(hash_value: str) -> None:
 # ─────────────────────────────────────────────────────────────────────────────
 
 def call_llm(content: str) -> dict:
-    """使用模型備用鏈調用 OpenRouter，回傳結構化 JSON 結果。
+    """LLM 調用：self-consistency (T9.5.3) + URL 驗證重試 (T9.3.3)。
 
     回傳結構：{"packages": [{"title", "validity", "price", "dining",
     "nights", "room_type", "booking", "note", "url"}, ...],
     "excluded_count": int}
     """
+    if SELF_CONSISTENCY_RUNS <= 1:
+        return _call_llm_with_url_retry(content)
+
+    runs: list[dict] = []
+    for run_n in range(SELF_CONSISTENCY_RUNS):
+        try:
+            runs.append(_call_llm_with_url_retry(content))
+        except RuntimeError:
+            if not runs:
+                raise
+            print(
+                f"[WARN] Self-consistency 第 {run_n + 1} 輪失敗，沿用前 {len(runs)} 輪"
+            )
+            break
+
+    if len(runs) == 1:
+        return runs[0]
+    return _intersect_runs(runs)
+
+
+def _call_llm_with_url_retry(content: str) -> dict:
+    """單輪 LLM 調用 + URL 驗證重試 (T9.3.3)。"""
+    last_data: dict | None = None
+    for attempt in range(URL_RETRY_LIMIT + 1):
+        data = _call_single_run(content)
+        last_data = data
+        invalid = _validate_urls(data)
+        if not invalid:
+            return data
+        if attempt < URL_RETRY_LIMIT:
+            print(
+                f"[WARN] {len(invalid)} 個套件 URL 無效，"
+                f"重試 ({attempt + 1}/{URL_RETRY_LIMIT})"
+            )
+            continue
+        print(
+            f"[WARN] 重試後仍有 {len(invalid)} 個 URL 無效，移除："
+            f"{invalid[:3]}"
+        )
+        return _drop_invalid_urls(data)
+    return last_data or {"packages": [], "excluded_count": 0}
+
+
+def _call_single_run(content: str) -> dict:
+    """單次 LLM 調用（3 模型備用鏈）。"""
     client = OpenAI(
         api_key=API_KEY,
         base_url=BASE_URL_API,
@@ -497,6 +659,55 @@ def call_llm(content: str) -> dict:
     raise RuntimeError(
         f"所有 LLM 模型均失敗。最後錯誤：{last_error}"
     )
+
+
+def _validate_urls(llm_data: dict) -> list[str]:
+    """回傳 URL 缺失或不含 `id=` 的套件標題清單。"""
+    invalid: list[str] = []
+    for pkg in llm_data.get("packages", []):
+        url = pkg.get("url", "")
+        if not url or "id=" not in url:
+            invalid.append(pkg.get("title") or "<未命名>")
+    return invalid
+
+
+def _drop_invalid_urls(llm_data: dict) -> dict:
+    """移除 URL 無效的套件，excluded_count 對應增加。"""
+    packages = llm_data.get("packages", [])
+    valid = [
+        p for p in packages
+        if p.get("url") and "id=" in p.get("url", "")
+    ]
+    dropped = len(packages) - len(valid)
+    if dropped:
+        llm_data["excluded_count"] = llm_data.get("excluded_count", 0) + dropped
+        llm_data["packages"] = valid
+    return llm_data
+
+
+def _intersect_runs(runs: list[dict]) -> dict:
+    """Self-consistency (T9.5.3)：多輪結果取 URL 交集。
+
+    - 交集為空時 fallback 至第一輪（避免 false negative）
+    - excluded_count 取各輪最大值
+    """
+    if not runs:
+        return {"packages": [], "excluded_count": 0}
+    if len(runs) == 1:
+        return runs[0]
+
+    base = runs[0]
+    base_urls = {p.get("url"): p for p in base["packages"]}
+    common: set[str] = set(base_urls.keys())
+
+    for other in runs[1:]:
+        other_urls = {p.get("url") for p in other["packages"]}
+        common &= other_urls
+
+    if common:
+        base["packages"] = [p for url, p in base_urls.items() if url in common]
+    base["excluded_count"] = max(r.get("excluded_count", 0) for r in runs)
+    return base
 
 
 def _parse_llm_json(raw: str) -> dict:

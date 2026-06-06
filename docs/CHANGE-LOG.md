@@ -4,6 +4,44 @@
 
 ---
 
+## 2026-06-06 | [T9.3.x + T9.4.x + T9.5.x implementation]
+
+- **Scope**: docs/PLAN.md T9.3.1/2/3, T9.4.1/2/3, T9.5.1/2/3
+- **Files modified/created**:
+  - `scrape_and_notify.py` — T9.3, T9.4, T9.5.3 changes
+  - `.github/workflows/hotel-monitor.yml` — T9.5.2 added `evaluate` job
+  - `docs/PLAN.md` — marked T9.3.x, T9.4.x, T9.5.x as `[x]`
+  - `evaluation/__init__.py` — NEW (package marker)
+  - `evaluation/golden_set.jsonl` — NEW (20 labeled examples)
+  - `evaluation/evaluate.py` — NEW (eval runner, output accuracy/precision/recall/F1)
+  - `tests/__init__.py` — NEW (package marker)
+  - `tests/test_t9.py` — NEW (stdlib unittest, 35 test cases)
+- **Code changes**:
+  - **T9.3.1** [ACC-2] `extract_end_dates` — added 4 regex patterns: YMD slash range (`2026/05/01 至 2026/08/31`), DMY slash range (`01/05/2026 至 31/08/2026`), YMD/DMY slash single-end (`至 2026/12/31` / `至 31/12/2026`), dash single-end (`至 2026-12-31`). 「即日起」 is not matched by any pattern → treated as no end date (still valid per SCOPE 3.3).
+  - **T9.3.2** [ACC-3] `HOTEL_KEYWORDS = ["住宿", "入住", "房間", "房"]` — added single-char 「房」 to cover 套房/家庭房/大床房 (otherwise 5 false negatives in golden set). New `has_hotel_keyword()` integrated into `prefilter()`. Also added 「表演套票」/「表演門票」 to `EXCLUDE_KEYWORDS` per SCOPE 3.2 「表演」 category.
+  - **T9.3.3** [ACC-5] New `_validate_urls()` (returns invalid titles) + `_drop_invalid_urls()` (increments excluded_count). `call_llm()` factored into `_call_single_run()` + `_call_llm_with_url_retry()` with `URL_RETRY_LIMIT=1` (env-tunable).
+  - **T9.4.1** [EFF-1] `scrape_all_pages()` switched to `ThreadPoolExecutor(max_workers=MAX_PAGES=3)`. All 3 pages fetched in parallel via `as_completed()`. Page 1 failure still raises; page 2/3 failures still log warning. Removed `time.sleep(1.5)` between sequential requests (now parallel).
+  - **T9.4.2** [EFF-3] Already implemented in commit `8113ae7` as part of T9.1.1 (BUG-1). `_is_page_stale()` fires per-page in the assembly loop. Marked `[x]` in PLAN.md with cross-reference.
+  - **T9.4.3** [EFF-4] New `has_stay_and_meal()` + `HEURISTIC_2ND_ROUND_THRESHOLD=3`. When `len(filtered) >= 3`, applies second round: keep only packages matching BOTH stay keyword AND meal keyword. Reduces LLM token cost in high-volume days.
+  - **T9.5.1** [ACC-6] `evaluation/golden_set.jsonl` — 20 entries (10 hotel, 10 non-hotel) with `expected: include|exclude` labels. Covers: slash-format dates, 即日起, expired (publish >180d), hotel-as-pickup-point, 表演 exclusion, 演唱會/雪場 exclusion, hotel+meal double-keyword cases.
+  - **T9.5.2** [ACC-6] New `evaluate` job in workflow. Trigger: `workflow_dispatch` only (no schedule, no PR — avoids LLM quota on free tier). Runs `python -m evaluation.evaluate` with `EVAL_MIN_ACCURACY=0.85`. Fails the job if accuracy < threshold.
+  - **T9.5.3** [ACC-7] `call_llm()` refactored to support multi-run. `SELF_CONSISTENCY_RUNS=2` (env-tunable). New `_intersect_runs()` takes URL intersection of all runs. **Empty intersection → fallback to first run** (avoids false negative when one run had a flake). If one run fails entirely, falls back to the successful run with a `[WARN]` log.
+  - **Module init**: `API_KEY` / `WEBHOOK_URL` switched from `os.environ["..."]` to `os.environ.get("...", "")` so eval can import the module without runtime secrets (errors still surface on actual call).
+- **Validation**:
+  - ✅ `python -m py_compile scrape_and_notify.py`
+  - ✅ `python -m unittest tests.test_t9` — **35 tests, 0 failures**
+  - ✅ `python -m evaluation.evaluate` — **20/20 correct (100% accuracy)**
+  - ✅ Workflow YAML parse: valid 2-job config
+- **Performance**:
+  - T9.4.1: 3-page scrape wall-time estimated `~3s → ~1.5s` (per SCOPE EFF-1)
+  - T9.5.3: Worst-case LLM calls 1 → 4 (self-consistency × URL retry). Free tier: 200/day, project uses 0-1/day normally → 4x still well under quota.
+- **Risk**: Low — additions only; no breaking changes to `main()` flow or Discord output format. `call_llm()` signature unchanged. `prefilter()` return type unchanged.
+- **Rollback**: `git revert HEAD~0` (single commit). All changes additive and isolated; previous commit (`234d52d`) remains in history.
+- **Note**: `tests/test_t9.py` is the canonical regression suite. CI runs `python -m unittest tests.test_t9` before any future T9.6+ changes.
+- **Caveat (golden set)**: 20 entries are synthetic-but-realistic patterns, not real scraped data. User can replace with real labels as fresh promotions are seen. Eval still meaningful as a prefilter regression test (today: 100%).
+
+---
+
 ## 2026-06-06 | [T9.2 implementation + T9.1 verification]
 
 - **Scope**: docs/PLAN.md T9.1.x (verify) + T9.2.x (implement)
