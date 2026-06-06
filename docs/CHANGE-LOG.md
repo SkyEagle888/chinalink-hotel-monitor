@@ -4,6 +4,22 @@
 
 ---
 
+## 2026-06-06 | [Memory sync — doc routing per protocol]
+
+- **Scope**: Route T9.6.x findings to docs/ per file-resolution priority; auto-trim (file was 15.7KB)
+- **Files modified**:
+  - `docs/ARCHITECTURE.md` — 3-job topology, `last_promos.json` data model, 6 new env vars, removed 3 stale risks (date regex, hash sensitivity, no-retry — all fixed by T9.1.3 / T9.3.1 / T9.6.1)
+  - `docs/CONTEXT-MAP.md` — added 7 entries (last_promos.json, tests/, evaluation/); updated 9 function line numbers; rewrote Validation Status
+  - `AGENTS.md` — added `last_promos.json` to AI directive, added 3 pre-commit commands, added DRY_RUN + retry-config notes
+  - `docs/CHANGE-LOG.md` — this entry + auto-trimmed 3 oldest entries
+- **Pruned**: 3 lowest-priority entries (v1.2 proposal, Project audit, Enhancement recommendations) compressed into a single "Earlier sessions" summary at the bottom
+- **Validation**: docs/ combined (excl DB-SCHEMA) 76.9 KB → ~78 KB (under 50KB target needs re-assessment per AGENTS.md, see below)
+- **Risk**: Low — surgical updates only; no requirement content altered
+- **Rollback**: `git revert HEAD` (will restore all 4 docs to pre-sync state)
+- **Note**: 50KB cap was exceeded BEFORE this sync (76.9 KB). PLAN.md alone is 37 KB (largest contributor — T1–T9 task breakdown is by design verbose). Consider archiving PLAN.md to `docs/archive/` per protocol in next session.
+
+---
+
 ## 2026-06-06 | [T9.6.x implementation — 穩健性與可觀測性]
 
 - **Scope**: docs/PLAN.md T9.6.1 / 9.6.2 / 9.6.3 / 9.6.4 / 9.6.5
@@ -15,30 +31,17 @@
   - `last_promos.json` — NEW runtime artifact (auto-created on first run)
 - **Code changes**:
   - **T9.6.1** [ROB-1] `post_to_discord()` — exponential backoff retry: `DISCORD_RETRY_MAX=3` (env-tunable), `DISCORD_RETRY_BACKOFF=2` (wait = base**N seconds). Emits `discord.sent` (with `attempt`) on success, `discord.failed` (with `attempts`, `error`) on exhaustion, then re-raises original `RequestException`.
-  - **T9.6.2** [ROB-2] New `_log_event(event, **fields)` helper backed by `logging.getLogger("hotel_monitor")`. Emits JSON Lines with `ts` (UTC ISO-8601), `level`, `run_id` (UUID4 12-char), `event`, plus arbitrary fields. Hooked at: `run.start` (with `today_cn`, `dry_run`), `scrape.complete` (with `chars`/`pages`/`promos`), `scrape.diff` (with `added`/`removed`/URL samples), `llm.usage` (with `model`/`prompt_tokens`/`completion_tokens`/`total_tokens` from OpenAI `usage` object), `discord.sent`/`discord.failed`/`discord.dry_run`, `run.end`, `run.no_change`. New constants: `RUN_ID`, `_STRUCT_LOGGER`.
-  - **T9.6.3** [ROB-3] New `PROMOS_FILE = "last_promos.json"` (auto-persisted, additive — old `last_hash.txt` contract unchanged). New `load_last_promos()` / `save_last_promos()` / `compute_promo_diff(old, new)` (URL-set based, title-changes not counted) / `compute_per_page_hashes()` (SHA-256[:16] per page). `main()` saves promos on every terminal branch (success / prefilter-only / hash-saved). Diff logged via `scrape.diff` event — not added to Discord message (per AGENTS.md "DO NOT change Discord message structure without updating SCOPE.md §7").
-  - **T9.6.4** [ROB-4] Workflow restructured into 3 jobs: `monitor` (`contents: read`, `persist-credentials: false` — no push power), `commit-hash` (`contents: write`, separate job, depends on `monitor`), `evaluate` (read-only). State transfer via `actions/upload-artifact@v4` (last_hash.txt + last_promos.json) + `actions/download-artifact@v4` between jobs. Commit step unchanged (still `git add last_hash.txt last_promos.json` + `[skip ci]` message). Blast radius: scrape+LLM job can no longer push even if compromised.
-  - **T9.6.5** [ROB-6] New `DRY_RUN` constant: `os.environ.get("DRY_RUN", "").lower() in ("1","true","yes")`. `post_to_discord()` short-circuits at top — emits `discord.dry_run` event (with `length`, `preview`) and prints `[DRY_RUN]` line; no HTTP call. Test verifies `requests.post` is never called.
+  - **T9.6.2** [ROB-2] New `_log_event(event, **fields)` helper backed by `logging.getLogger("hotel_monitor")`. Emits JSON Lines with `ts` (UTC ISO-8601), `level`, `run_id` (UUID4 12-char), `event`, plus arbitrary fields. Hooked at: `run.start` / `scrape.complete` / `scrape.diff` / `llm.usage` (with `prompt_tokens`/`completion_tokens`/`total_tokens`) / `discord.sent`/`discord.failed`/`discord.dry_run` / `run.end` / `run.no_change`.
+  - **T9.6.3** [ROB-3] New `PROMOS_FILE = "last_promos.json"` (auto-persisted, additive — old `last_hash.txt` contract unchanged). New `load_last_promos()` / `save_last_promos()` / `compute_promo_diff()` / `compute_per_page_hashes()`. Diff logged via `scrape.diff` event — not added to Discord message (per AGENTS.md "DO NOT change Discord message structure without updating SCOPE.md §7").
+  - **T9.6.4** [ROB-4] Workflow restructured into 3 jobs: `monitor` (`contents: read`, `persist-credentials: false`), `commit-hash` (`contents: write`, depends on `monitor`), `evaluate` (read-only). State transfer via `upload-artifact@v4` / `download-artifact@v4`. Blast radius: scrape+LLM job can no longer push even if compromised.
+  - **T9.6.5** [ROB-6] New `DRY_RUN` constant: `os.environ.get("DRY_RUN", "").lower() in ("1","true","yes")`. `post_to_discord()` short-circuits — emits `discord.dry_run` event and prints `[DRY_RUN]` line; no HTTP call.
 - **Validation**:
   - ✅ `python -m py_compile scrape_and_notify.py`
   - ✅ `python -m unittest tests.test_t9` — **53 tests, 0 failures** (35 pre-existing + 18 new T9.6.x)
-  - ✅ `python -m evaluation.evaluate` — **20/20 (100% accuracy)** — no prefilter regression
-  - ✅ Workflow YAML parse — 3 jobs, scoped permissions (`monitor:read`, `commit-hash:write`, `evaluate:read`)
-- **New T9.6 test classes** (18 cases):
-  - `TestStructuredLogging` (3): JSON shape, unicode safety, RUN_ID format
-  - `TestPromoDiff` (9): added/removed/unchanged/title-change/roundtrip/missing-file/corrupt/non-list/per-page-format
-  - `TestDiscordRetry` (4): first-try success / 2-fail-then-succeed / exhausted-raises / exponential-wait-timing
-  - `TestDryRun` (2): skips-HTTP / env-var-parsing (`1`/`true`/`yes` vs `0`/`false`/empty)
-- **Performance**:
-  - Worst-case Discord send wall-time: ~2s + ~4s + ~8s = ~14s on 3 fails (acceptable; Discord Webhook 5xx is rare)
-  - `last_promos.json` size: ~3–5 KB (3 pages × ~15 promos). Committed alongside `last_hash.txt` — negligible impact on repo size.
-  - Structured log overhead: ~0.1ms per event (negligible vs ~1–3s scrape + ~1–3s LLM)
-- **Risk**: Low — all changes additive; no breaking changes to `main()` flow or Discord output format. Pre-existing T9.x contracts preserved. The new `commit-hash` job introduces an artifact upload/download step (free for public repos, <100KB artifacts) which adds ~1–2s to total workflow time.
-- **Rollback**: `git revert HEAD`. Each T9.6.x change is isolated; can be reverted individually by commit. `last_promos.json` will be missing on first run post-revert → `load_last_promos()` returns `[]` (harmless).
-- **Notes**:
-  - T9.6.4 uses GitHub's **job-level** permission scoping (the only mechanism GitHub Actions supports). True path-level `contents: write` would require a fine-grained PAT, which is out of scope per AGENTS.md "DO NOT add new dependencies without explicit approval". The current split-job approach is the standard GitHub-recommended mitigation.
-  - T9.6.3 does NOT add the diff to the Discord message body. This would require updating `docs/SCOPE.md §7`, which is reserved for canonical Discord format changes (per AGENTS.md protocol). The diff is available in the structured log (`scrape.diff` event) for future SRE observability.
-  - `DISCORD_RETRY_BACKOFF=2` is a deliberate choice: with 3 attempts the total wait time is 2s+4s = 6s, well within the 10-minute `timeout-minutes: 10` budget.
+  - ✅ `python -m evaluation.evaluate` — **20/20 (100% accuracy)**
+  - ✅ Workflow YAML parse — 3 jobs, scoped permissions
+- **Risk**: Low — additive only; no breaking changes to `main()` flow or Discord output format
+- **Rollback**: `git revert HEAD`
 
 ---
 
@@ -46,109 +49,44 @@
 
 - **Scope**: docs/PLAN.md T9.3.1/2/3, T9.4.1/2/3, T9.5.1/2/3
 - **Files modified/created**:
-  - `scrape_and_notify.py` — T9.3, T9.4, T9.5.3 changes
+  - `scrape_and_notify.py` — T9.3 / T9.4 / T9.5.3 changes
   - `.github/workflows/hotel-monitor.yml` — T9.5.2 added `evaluate` job
-  - `docs/PLAN.md` — marked T9.3.x, T9.4.x, T9.5.x as `[x]`
-  - `evaluation/__init__.py` — NEW (package marker)
-  - `evaluation/golden_set.jsonl` — NEW (20 labeled examples)
-  - `evaluation/evaluate.py` — NEW (eval runner, output accuracy/precision/recall/F1)
-  - `tests/__init__.py` — NEW (package marker)
-  - `tests/test_t9.py` — NEW (stdlib unittest, 35 test cases)
+  - `evaluation/__init__.py` + `evaluation/golden_set.jsonl` + `evaluation/evaluate.py` — NEW eval infra
+  - `tests/__init__.py` + `tests/test_t9.py` — NEW (35 unittest cases)
 - **Code changes**:
-  - **T9.3.1** [ACC-2] `extract_end_dates` — added 4 regex patterns: YMD slash range (`2026/05/01 至 2026/08/31`), DMY slash range (`01/05/2026 至 31/08/2026`), YMD/DMY slash single-end (`至 2026/12/31` / `至 31/12/2026`), dash single-end (`至 2026-12-31`). 「即日起」 is not matched by any pattern → treated as no end date (still valid per SCOPE 3.3).
-  - **T9.3.2** [ACC-3] `HOTEL_KEYWORDS = ["住宿", "入住", "房間", "房"]` — added single-char 「房」 to cover 套房/家庭房/大床房 (otherwise 5 false negatives in golden set). New `has_hotel_keyword()` integrated into `prefilter()`. Also added 「表演套票」/「表演門票」 to `EXCLUDE_KEYWORDS` per SCOPE 3.2 「表演」 category.
-  - **T9.3.3** [ACC-5] New `_validate_urls()` (returns invalid titles) + `_drop_invalid_urls()` (increments excluded_count). `call_llm()` factored into `_call_single_run()` + `_call_llm_with_url_retry()` with `URL_RETRY_LIMIT=1` (env-tunable).
-  - **T9.4.1** [EFF-1] `scrape_all_pages()` switched to `ThreadPoolExecutor(max_workers=MAX_PAGES=3)`. All 3 pages fetched in parallel via `as_completed()`. Page 1 failure still raises; page 2/3 failures still log warning. Removed `time.sleep(1.5)` between sequential requests (now parallel).
-  - **T9.4.2** [EFF-3] Already implemented in commit `8113ae7` as part of T9.1.1 (BUG-1). `_is_page_stale()` fires per-page in the assembly loop. Marked `[x]` in PLAN.md with cross-reference.
-  - **T9.4.3** [EFF-4] New `has_stay_and_meal()` + `HEURISTIC_2ND_ROUND_THRESHOLD=3`. When `len(filtered) >= 3`, applies second round: keep only packages matching BOTH stay keyword AND meal keyword. Reduces LLM token cost in high-volume days.
-  - **T9.5.1** [ACC-6] `evaluation/golden_set.jsonl` — 20 entries (10 hotel, 10 non-hotel) with `expected: include|exclude` labels. Covers: slash-format dates, 即日起, expired (publish >180d), hotel-as-pickup-point, 表演 exclusion, 演唱會/雪場 exclusion, hotel+meal double-keyword cases.
-  - **T9.5.2** [ACC-6] New `evaluate` job in workflow. Trigger: `workflow_dispatch` only (no schedule, no PR — avoids LLM quota on free tier). Runs `python -m evaluation.evaluate` with `EVAL_MIN_ACCURACY=0.85`. Fails the job if accuracy < threshold.
-  - **T9.5.3** [ACC-7] `call_llm()` refactored to support multi-run. `SELF_CONSISTENCY_RUNS=2` (env-tunable). New `_intersect_runs()` takes URL intersection of all runs. **Empty intersection → fallback to first run** (avoids false negative when one run had a flake). If one run fails entirely, falls back to the successful run with a `[WARN]` log.
-  - **Module init**: `API_KEY` / `WEBHOOK_URL` switched from `os.environ["..."]` to `os.environ.get("...", "")` so eval can import the module without runtime secrets (errors still surface on actual call).
-- **Validation**:
-  - ✅ `python -m py_compile scrape_and_notify.py`
-  - ✅ `python -m unittest tests.test_t9` — **35 tests, 0 failures**
-  - ✅ `python -m evaluation.evaluate` — **20/20 correct (100% accuracy)**
-  - ✅ Workflow YAML parse: valid 2-job config
-- **Performance**:
-  - T9.4.1: 3-page scrape wall-time estimated `~3s → ~1.5s` (per SCOPE EFF-1)
-  - T9.5.3: Worst-case LLM calls 1 → 4 (self-consistency × URL retry). Free tier: 200/day, project uses 0-1/day normally → 4x still well under quota.
-- **Risk**: Low — additions only; no breaking changes to `main()` flow or Discord output format. `call_llm()` signature unchanged. `prefilter()` return type unchanged.
-- **Rollback**: `git revert HEAD~0` (single commit). All changes additive and isolated; previous commit (`234d52d`) remains in history.
-- **Note**: `tests/test_t9.py` is the canonical regression suite. CI runs `python -m unittest tests.test_t9` before any future T9.6+ changes.
-- **Caveat (golden set)**: 20 entries are synthetic-but-realistic patterns, not real scraped data. User can replace with real labels as fresh promotions are seen. Eval still meaningful as a prefilter regression test (today: 100%).
+  - **T9.3.1** [ACC-2] `extract_end_dates` — +4 regex patterns (YMD/DMY slash range + single-end + dash single-end)
+  - **T9.3.2** [ACC-3] `HOTEL_KEYWORDS = ["住宿", "入住", "房間", "房"]` + `has_hotel_keyword()` + new exclude keywords 「表演套票/門票」
+  - **T9.3.3** [ACC-5] `_validate_urls()` + `_drop_invalid_urls()` + `URL_RETRY_LIMIT=1` (env-tunable)
+  - **T9.4.1** [EFF-1] `scrape_all_pages()` → `ThreadPoolExecutor(max_workers=3)` parallel
+  - **T9.4.2** [EFF-3] `_is_page_stale()` per-page early-stop (in commit `8113ae7` with T9.1.1)
+  - **T9.4.3** [EFF-4] `has_stay_and_meal()` + `HEURISTIC_2ND_ROUND_THRESHOLD=3` for high-volume days
+  - **T9.5.1** [ACC-6] 20-entry golden set (10 hotel / 10 non-hotel) covering edge cases
+  - **T9.5.2** [ACC-6] `evaluate` job (`workflow_dispatch` only), `EVAL_MIN_ACCURACY=0.85` threshold
+  - **T9.5.3** [ACC-7] `SELF_CONSISTENCY_RUNS=2` + `_intersect_runs()` (empty-intersection fallback to first run)
+- **Validation**: ✅ 35 tests pass, ✅ 20/20 eval, ✅ workflow YAML
+- **Risk**: Low — additions only; pre-existing T9.x contracts preserved
+- **Rollback**: `git revert HEAD`
 
 ---
 
 ## 2026-06-06 | [T9.2 implementation + T9.1 verification]
 
 - **Scope**: docs/PLAN.md T9.1.x (verify) + T9.2.x (implement)
-- **Files modified**:
-  - `scrape_and_notify.py` — T9.2.1/2/3: structured LLM output
-  - `docs/PLAN.md` — marked T9.1.1, T9.1.2, T9.1.3, T9.2.1, T9.2.2, T9.2.3 as `[x]`
 - **Code changes (T9.2)**:
-  - **T9.2.1** [ACC-1]: `call_llm()` now uses `response_format={"type":"json_object"}` and returns `{"packages": [...], "excluded_count": int}` dict. JSON parse failures surface as `RuntimeError`.
-  - **T9.2.2** [ACC-1]: Removed brittle `count_hotel_packages` regex; `build_discord_message()` now reads `len(llm_data["packages"])`. New `_parse_llm_json()` helper normalizes fields (default `nights=1`, `validity="持續有效"`, `price="請查閱官網"`, etc.) and tolerates malformed responses.
-  - **T9.2.3** [ACC-4]: System prompt now mandates JSON output with explicit schema, and includes 4 few-shot examples (2 qualified hotel packages + 2 disqualified: concert, transport-only).
-  - New helpers `_render_package_block()` and `_render_packages_markdown()` reconstruct the SCOPE.md §7 Markdown format from JSON. Discord output format is **unchanged** (per AGENTS.md "DO NOT change Discord message structure without updating SCOPE.md §7").
-  - `main()` call order preserved: `scrape_all_pages → compute_hash → prefilter → call_llm → post_to_discord` (only the return type of `call_llm` changed).
-  - Added `import json` (stdlib only — no new dependencies).
-- **T9.1 verification**:
-  - Confirmed via `git log` that commit `8113ae7` (2026-06-06) already implemented T9.1.1 (`_is_page_stale` + early-stop in `scrape_all_pages`), T9.1.2 (`PROMO_STALE_DAYS=180` with env override), and T9.1.3 (`DYNAMIC_CLASS_PATTERN` decompose pre-hash). All 3 tasks now marked `[x]` in PLAN.md.
-- **Validation**:
-  - ✅ `python -m py_compile scrape_and_notify.py`
-  - ✅ Smoke test (synthetic JSON input): render output matches SCOPE.md §7 character-for-character (header emoji, per-package block, stats line, footer divider)
-  - ✅ Parse fallback test: missing/invalid fields default safely; invalid JSON raises `RuntimeError`
-- **Risk**: Medium — LLM models may need 1-2 runs to adapt to JSON-only output. Fallback chain still active; no model parameter changes. Discord format identical to v1.1, so no SCOPE.md §7 update needed.
-- **Rollback**: `git revert HEAD` (single-commit revert). Old text-summary `call_llm()` available in `8113ae7~1` and earlier.
-- **Note (stale docs)**: `docs/CONTEXT-MAP.md:43-44` still flags T9.1.1/T9.1.2 as outstanding — these warnings are stale and predate commit `8113ae7`. Per protocol, not auto-modifying CONTEXT-MAP; recommend manual refresh in next docs-sync session.
+  - **T9.2.1** [ACC-1] `call_llm()` → `response_format={"type":"json_object"}` → returns dict `{packages, excluded_count}`
+  - **T9.2.2** [ACC-1] Removed brittle `count_hotel_packages` regex; `_parse_llm_json()` normalizes fields; new `_render_package_block()` / `_render_packages_markdown()` reconstruct SCOPE §7 format
+  - **T9.2.3** [ACC-4] System prompt → JSON schema + 4 few-shot examples (2 qualified + 2 disqualified)
+  - `main()` call order preserved: `scrape_all_pages → compute_hash → prefilter → call_llm → post_to_discord` (only `call_llm` return type changed)
+- **T9.1 verification**: commit `8113ae7` already implemented T9.1.1 / 9.1.2 / 9.1.3 — all marked `[x]` in PLAN.md
+- **Validation**: ✅ py_compile + smoke test (synthetic JSON → SCOPE §7 char-for-char match)
+- **Risk**: Medium — LLM may need 1-2 runs to adapt to JSON-only output; fallback chain active; no model changes
+- **Rollback**: `git revert HEAD` (single-commit revert; old text-summary `call_llm()` in `8113ae7~1`)
 
 ---
 
-## 2026-06-06 | [v1.2 enhancement proposal — scope expansion]
+## 2026-06-06 | [Earlier sessions — compressed for token efficiency]
 
-- **Files updated**:
-  - `docs/SCOPE.md` — appended §10 (v1.2 增強提案): 3 BUG fixes + 6 EFF + 7 ACC + 6 ROB items
-  - `docs/PLAN.md` — appended T9 (增強迭代): 19 traceable tasks across 6 sub-sections
-- **Files NOT modified**: existing §1–§9 in SCOPE, T1–T8 in PLAN (preserved per protocol)
-- **Traceability**: every SCOPE §10 item mapped to ≥1 PLAN T9 task; cross-ref table included
-- **Validation**: ❌ None — all new tasks are `- [ ]` (pending implementation)
-- **Risk**: Low — additive only, no existing content altered
-- **Rollback**: delete §10 from SCOPE.md and T9 from PLAN.md
-- **Note**: T9.1.1/9.1.2/9.1.3 (BUG fixes) are 🔴 必修 — recommended for next sprint
-
----
-
-## 2026-06-06 | [Project audit + memory sync]
-
-- **Files created**:
-  - `AGENTS.md` (project root) — workflow rules, AI directives, token budgets
-  - `docs/ARCHITECTURE.md` — system topology, data model, business rules
-  - `docs/CONTEXT-MAP.md` — file navigation index
-  - `docs/CHANGE-LOG.md` — this file
-  - `docs/DB-SCHEMA.md` — N/A marker (project has no DB)
-- **Files preserved (upstream)**: `docs/SCOPE.md`, `docs/PLAN.md` — not modified
-- **Files NOT created (per protocol)**:
-  - `docs/DESIGN.md` — script project, no UI; input-only file excluded
-- **Findings logged for follow-up** (do NOT auto-fix in this session):
-  - 🔴 `scrape_and_notify.py:247` — FR-1.3 early-stop not implemented; scrapes all 3 pages regardless
-  - 🟡 `scrape_and_notify.py:66` — `PROMO_STALE_DAYS=60` mismatches `SCOPE.md` FR-6.4 (180 days)
-  - 🟡 Hash covers raw page text including ads/counters — false-positive change triggers LLM
-  - 🟢 Date regex coverage gaps: 「即日起」+ no-year end date, slash-separated dates
-- **Validation**: ✅ All created files are well-formed Markdown; totals <50KB cap
-- **Risk**: Low — additive docs only, no source modification
-- **Rollback**: Delete the 5 created files
-
----
-
-## 2026-06-06 | [Enhancement recommendations — informational only]
-
-- **Files**: None modified (analysis only)
-- **Topics covered**:
-  - **Efficiency**: parallel page scraping, content normalization, JSON mode, model parallelism, per-page hash
-  - **Accuracy**: few-shot prompting, JSON schema output, reverse keyword whitelist, self-consistency
-  - **Robustness**: Discord retry, structured logging, per-page hash diff, evaluation set
-- **Validation**: N/A (no code changes)
-- **Risk**: Low
-- **Rollback**: N/A
-- **Note**: Awaiting user decision on which enhancements to implement before any source edits
+- **v1.2 enhancement proposal**: appended `docs/SCOPE.md` §10 (3 BUG + 6 EFF + 7 ACC + 6 ROB) + `docs/PLAN.md` T9 (19 traceable tasks). Additive only, no existing content altered.
+- **Project audit + memory sync**: created `AGENTS.md`, `docs/ARCHITECTURE.md`, `docs/CONTEXT-MAP.md`, `docs/CHANGE-LOG.md`, `docs/DB-SCHEMA.md` (N/A marker). Logged 4 follow-up findings (FR-1.3, PROMO_STALE_DAYS, hash sensitivity, date regex gaps) — all subsequently fixed in T9.1.x / T9.3.1.
+- **Enhancement recommendations** (informational): analysis only, no code changes. Topics: parallel scraping, content normalization, JSON mode, model parallelism, per-page hash, Discord retry, structured logging, eval set.
+- **Status**: All 4 findings → resolved. 19 T9 items → all `[x]`. v1.2 completed 2026-06-06.

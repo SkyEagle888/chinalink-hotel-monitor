@@ -5,9 +5,14 @@
 ## Workflow Rules
 - Daily 09:00 HKT cron (GitHub Actions) + manual trigger via `workflow_dispatch`
 - Single Python entry point: `scrape_and_notify.py` (no package, no venv in repo)
-- Pre-commit validation: `python -m py_compile scrape_and_notify.py`
-- No external state store — only `last_hash.txt` for change detection
+- 3-job workflow: `monitor` (read) → `commit-hash` (write) + `evaluate` (read, manual only)
+- Pre-commit validation (all 3 must pass):
+  - `python -m py_compile scrape_and_notify.py`
+  - `python -m unittest tests.test_t9` (53 cases)
+  - `python -m evaluation.evaluate` (golden set 20/20)
+- No external state store — `last_hash.txt` (SHA-256) + `last_promos.json` (promo list) for change + diff detection
 - Secrets must NEVER appear in source — use GitHub Secrets/Variables only
+- Structured JSON logs (T9.6.2): `_log_event(event, **fields)` emits JSON Lines to stdout
 
 ## Context Loading Protocol
 - At session start, always read docs/CONTEXT-MAP.md before exploring code.
@@ -34,8 +39,10 @@
 - CHANGE-LOG rotation: 30 sessions / 14 days; auto-trim when >15KB
 
 ## AI Directives
-- DO NOT modify `last_hash.txt` manually — only the GitHub Actions bot commits.
+- DO NOT modify `last_hash.txt` / `last_promos.json` manually — only the GitHub Actions bot commits.
 - DO NOT add new dependencies without explicit approval.
 - DO NOT change Discord message structure without updating `docs/SCOPE.md` §7.
 - Honour `EXCLUDE_KEYWORDS` and `MODELS` lists as source of truth for filter logic and LLM fallback chain.
 - When refactoring `scrape_and_notify.py`, preserve the `main()` call order: `scrape_all_pages → compute_hash → prefilter → call_llm → post_to_discord`.
+- Use `DRY_RUN=true` env var for smoke tests; never post to Discord from local development without explicit approval.
+- Discord retry config is env-tunable: `DISCORD_RETRY_MAX` (default 3) + `DISCORD_RETRY_BACKOFF` (default 2).
