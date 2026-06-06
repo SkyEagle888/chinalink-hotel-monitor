@@ -4,6 +4,22 @@
 
 ---
 
+## 2026-06-06 | [Hotfix — commit-hash job exit 128 on bootstrap]
+
+- **Scope**: `.github/workflows/hotel-monitor.yml` (1 step, 2 lines changed)
+- **Symptom**: `commit-hash` job failed with `fatal: pathspec 'last_promos.json' did not match any files` (exit 128) on first scheduled run after T9.6.3
+- **Root cause**: `last_promos.json` not yet tracked in git; `save_last_promos()` is only called on Discord-post paths (scrape_and_notify.py:1138, 1162) — the "no change" early-exit path (line 1083–1096) never creates it. `upload-artifact` silently skips missing files (`if-no-files-found: ignore`), so `commit-hash` downloaded only `last_hash.txt` and then `git add last_promos.json` failed.
+- **Fix**: Wrap each `git add` in an `if [ -f ... ]` guard so the bootstrap window (and all future "no change" days) commits only what exists. Script logic unchanged — design intent preserved: no state mutation when nothing changed.
+- **Validation**:
+  - ✅ `python -m py_compile scrape_and_notify.py`
+  - ✅ `python -m unittest tests.test_t9` — 53/53
+  - ✅ `python -m evaluation.evaluate` — 20/20 (100%)
+  - ✅ YAML parse — 3 jobs intact
+- **Risk**: Minimal — workflow-only, surgical; revertible by `git revert HEAD`
+- **Rollback**: `git revert HEAD`
+
+---
+
 ## 2026-06-06 | [Memory sync — doc routing per protocol]
 
 - **Scope**: Route T9.6.x findings to docs/ per file-resolution priority; auto-trim (file was 15.7KB)
