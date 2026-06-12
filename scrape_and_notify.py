@@ -712,8 +712,34 @@ def _call_llm_with_url_retry(content: str) -> dict:
     return last_data or {"packages": [], "excluded_count": 0}
 
 
+def _invoke_model(
+    client: OpenAI,
+    model: str,
+    content: str,
+    use_response_format: bool,
+):
+    """單次模型調用；`use_response_format=False` 時省略 JSON 模式。"""
+    kwargs = {
+        "model": model,
+        "messages": [
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "user", "content": content},
+        ],
+        "extra_body": {"application": "chinalink-hotel-monitor"},
+        "timeout": 90,
+    }
+    if use_response_format:
+        kwargs["response_format"] = {"type": "json_object"}
+    return client.chat.completions.create(**kwargs)
+
+
 def _call_single_run(content: str) -> dict:
-    """單次 LLM 調用（3 模型備用鏈）。"""
+    """單次 LLM 調用（3 模型備用鏈）。
+
+    對每個模型先嘗試 `response_format={"type":"json_object"}`；
+    若供應商（如 Venice）以 HTTP 400 拒絕，回退至無 JSON 模式重試同模型。
+    重試亦失敗才移至下一個備用模型。
+    """
     client = OpenAI(
         api_key=API_KEY,
         base_url=BASE_URL_API,
@@ -727,32 +753,50 @@ def _call_single_run(content: str) -> dict:
     for model in MODELS:
         try:
             print(f"[INFO] 嘗試模型：{model}")
-            response = client.chat.completions.create(
-                model=model,
-                messages=[
-                    {"role": "system", "content": SYSTEM_PROMPT},
-                    {"role": "user", "content": content},
-                ],
-                response_format={"type": "json_object"},
-                extra_body={"application": "chinalink-hotel-monitor"},
-                timeout=90,
+            response = _invoke_model(
+                client, model, content, use_response_format=True
             )
-            raw = response.choices[0].message.content.strip()
-            print(f"[INFO] 成功使用模型：{model}")
-            usage = getattr(response, "usage", None)
-            if usage is not None:
-                _log_event(
-                    "llm.usage",
-                    model=model,
-                    prompt_tokens=getattr(usage, "prompt_tokens", None),
-                    completion_tokens=getattr(usage, "completion_tokens", None),
-                    total_tokens=getattr(usage, "total_tokens", None),
-                )
-            return _parse_llm_json(raw)
         except Exception as e:
-            print(f"[WARN] 模型 {model} 失敗：{e}")
-            last_error = e
-            time.sleep(2)
+            err_text = str(e)
+            if "response_format" in err_text and (
+                "not supported" in err_text.lower() or "400" in err_text
+            ):
+                print(
+                    f"[WARN] 模型 {model} 不支援 response_format，"
+                    f"改用 prompt-only JSON 重試"
+                )
+                _log_event(
+                    "llm.response_format_fallback",
+                    model=model,
+                    error_preview=err_text[:200],
+                )
+                try:
+                    response = _invoke_model(
+                        client, model, content, use_response_format=False
+                    )
+                except Exception as e2:
+                    print(f"[WARN] 模型 {model} 失敗：{e2}")
+                    last_error = e2
+                    time.sleep(2)
+                    continue
+            else:
+                print(f"[WARN] 模型 {model} 失敗：{e}")
+                last_error = e
+                time.sleep(2)
+                continue
+
+        raw = response.choices[0].message.content.strip()
+        print(f"[INFO] 成功使用模型：{model}")
+        usage = getattr(response, "usage", None)
+        if usage is not None:
+            _log_event(
+                "llm.usage",
+                model=model,
+                prompt_tokens=getattr(usage, "prompt_tokens", None),
+                completion_tokens=getattr(usage, "completion_tokens", None),
+                total_tokens=getattr(usage, "total_tokens", None),
+            )
+        return _parse_llm_json(raw)
 
     raise RuntimeError(
         f"所有 LLM 模型均失敗。最後錯誤：{last_error}"

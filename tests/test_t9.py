@@ -553,6 +553,116 @@ class TestDryRun(unittest.TestCase):
         os.environ.pop("DRY_RUN", None)
 
 
+class TestResponseFormatFallback(unittest.TestCase):
+    """當供應商（如 Venice）不支援 `response_format` 時，應無縫改用 prompt-only JSON。"""
+
+    def setUp(self):
+        self._orig_self_consistency = san.SELF_CONSISTENCY_RUNS
+        san.SELF_CONSISTENCY_RUNS = 1
+        self.events: list[str] = []
+
+        class _Capture(logging.Handler):
+            def emit(self, record):
+                self.events.append(record.getMessage())
+
+        self._capture = _Capture()
+        self._capture.events = self.events
+        san._STRUCT_LOGGER.addHandler(self._capture)
+
+    def tearDown(self):
+        san.SELF_CONSISTENCY_RUNS = self._orig_self_consistency
+        san._STRUCT_LOGGER.removeHandler(self._capture)
+
+    def _events_of(self, name: str) -> list[dict]:
+        return [
+            json.loads(line) for line in self.events
+            if line.startswith("{") and f'"event": "{name}"' in line
+        ]
+
+    def _make_response(self, payload: str):
+        resp = mock.Mock()
+        resp.choices = [mock.Mock()]
+        resp.choices[0].message.content = payload
+        resp.usage = None
+        return resp
+
+    def test_fallback_on_response_format_400(self):
+        """首次使用 JSON 模式失敗 → 自動重試無 response_format。"""
+        unsupported_err = Exception(
+            "Error code: 400 - response_format is not supported by this model"
+        )
+        good_payload = json.dumps({
+            "packages": [
+                {
+                    "title": "測試酒店套票",
+                    "validity": "持續有效",
+                    "price": "HK$999",
+                    "dining": "自助早餐",
+                    "nights": 1,
+                    "room_type": "標準房",
+                    "booking": "微信小程式",
+                    "note": "",
+                    "url": "https://www.tilchinalink.com/promotions.php?id=999",
+                }
+            ],
+            "excluded_count": 0,
+        })
+
+        with mock.patch("scrape_and_notify._invoke_model") as im:
+            im.side_effect = [unsupported_err, self._make_response(good_payload)]
+            with mock.patch("scrape_and_notify.time.sleep"):
+                result = san._call_single_run("dummy content")
+
+        self.assertEqual(im.call_count, 2)
+        self.assertEqual(
+            im.call_args_list[0].kwargs["use_response_format"], True
+        )
+        self.assertEqual(
+            im.call_args_list[1].kwargs["use_response_format"], False
+        )
+        self.assertEqual(len(result["packages"]), 1)
+        self.assertEqual(result["packages"][0]["title"], "測試酒店套票")
+
+        fallback = self._events_of("llm.response_format_fallback")
+        self.assertEqual(len(fallback), 1)
+        self.assertEqual(fallback[0]["model"], san.MODELS[0])
+
+    def test_non_response_format_error_skips_fallback(self):
+        """非 response_format 錯誤（如 5xx）不觸發 fallback，直接換下一模型。"""
+        other_err = Exception("Error code: 503 - upstream unavailable")
+        with mock.patch("scrape_and_notify._invoke_model") as im:
+            im.side_effect = other_err
+            with mock.patch("scrape_and_notify.time.sleep"):
+                with self.assertRaises(RuntimeError) as ctx:
+                    san._call_single_run("dummy content")
+        self.assertEqual(im.call_count, len(san.MODELS))
+        self.assertIn("所有 LLM 模型均失敗", str(ctx.exception))
+        self.assertEqual(self._events_of("llm.response_format_fallback"), [])
+
+    def test_fallback_failure_moves_to_next_model(self):
+        """response_format fallback 重試亦失敗時，移至下一個備用模型。"""
+        unsupported_err = Exception(
+            "Error code: 400 - response_format is not supported by this model"
+        )
+        secondary_err = Exception("Error code: 500 - persistent failure")
+        good_payload = json.dumps({"packages": [], "excluded_count": 0})
+
+        with mock.patch("scrape_and_notify._invoke_model") as im:
+            im.side_effect = [
+                unsupported_err, secondary_err,
+                self._make_response(good_payload),
+            ]
+            with mock.patch("scrape_and_notify.time.sleep"):
+                result = san._call_single_run("dummy content")
+
+        self.assertEqual(im.call_count, 3)
+        self.assertEqual(result["packages"], [])
+
+        fallback = self._events_of("llm.response_format_fallback")
+        self.assertEqual(len(fallback), 1)
+        self.assertEqual(fallback[0]["model"], san.MODELS[0])
+
+
 def _parse_dry_run_env() -> bool:
     return os.environ.get("DRY_RUN", "").lower() in ("1", "true", "yes")
 

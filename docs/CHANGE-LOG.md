@@ -4,6 +4,27 @@
 
 ---
 
+## 2026-06-12 | [Hotfix — Venice 供應商不支援 `response_format`，3 模型全失敗]
+
+- **Scope**: `scrape_and_notify.py:715-803` (`_invoke_model` / `_call_single_run`) + `tests/test_t9.py:561-651` (新增 `TestResponseFormatFallback`)
+- **Symptom**: Discord 收到 `⚠️ 優惠監察機器人 LLM 錯誤 | 11/06/2026 — 摘要生成失敗：所有 LLM 模型均失敗。最後錯誤：... 'response_format is not supported by this model' ... provider_name: 'Venice'` — 抓取成功但 LLM 全鏈失敗，3 個備用模型均中招。
+- **Root cause**: T9.2.1 假設 `response_format={"type":"json_object"}` 廣泛支援 3 個備用模型。實測 OpenRouter 將 `qwen/qwen3-next-80b:free` 路由至 Venice，而 Venice 拒絕 JSON 模式（HTTP 400）。每個模型只試一次 JSON 模式 → 全部 400 → 無可用 fallback。
+- **Fix**: 對每個模型先以 `response_format=json_object` 嘗試；若供應商以 HTTP 400 / "not supported" 拒絕，**自動重試同模型無 JSON 模式**（prompt-only 4 few-shot JSON 範例 + 嚴格 schema 已於 T9.2.3 注入）。新事件 `llm.response_format_fallback` 記錄降級情形。
+  - 抽出 `_invoke_model(client, model, content, use_response_format)` 輔助函數，減少重複呼叫樣板
+  - 重試亦失敗才移至下一個備用模型（保留 T9.3.3 URL 重試 + T9.5.3 self-consistency 語意）
+- **Code changes**:
+  - `scrape_and_notify.py:715-733` — 新 `_invoke_model()`：依 `use_response_format` flag 決定是否加 `response_format` 參數
+  - `scrape_and_notify.py:736-803` — `_call_single_run()`：捕獲 `response_format` + `not supported`/`400` 雙觸發詞後重試同模型；emit `llm.response_format_fallback` 結構化事件
+  - `tests/test_t9.py:561-651` — 新 `TestResponseFormatFallback`（3 cases）：fallback 路徑 / 非 fallback 觸發詞 / fallback 失敗移下一模型
+- **Validation**:
+  - ✅ `python -m py_compile scrape_and_notify.py`
+  - ✅ `python -m unittest tests.test_t9` — **56/56**（53 pre-existing + 3 new）
+  - ✅ `python -m evaluation.evaluate` — **20/20 (100%)**
+- **Risk**: Low — graceful degradation only; 對支援 JSON 模式的供應商行為完全不變（first try 仍走 JSON mode）
+- **Rollback**: `git revert HEAD`
+
+---
+
 ## 2026-06-06 | [Hotfix — commit-hash job exit 128 on bootstrap]
 
 - **Scope**: `.github/workflows/hotel-monitor.yml` (1 step, 2 lines changed)
