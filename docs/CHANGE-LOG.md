@@ -4,6 +4,32 @@
 
 ---
 
+## 2026-06-17 | [v1.3 — Target switch to hotel_packages.php?lang=tc + region whitelist]
+
+- **Scope**: `docs/SCOPE.md` §11 (new v1.3 additive section) + `docs/PLAN.md` T10 + `scrape_and_notify.py` (major refactor) + `tests/test_t9.py` + `evaluation/golden_set.jsonl` + `docs/ARCHITECTURE.md` + `docs/CONTEXT-MAP.md` + `README.md`
+- **Trigger**: User wanted to monitor hotel packages only (not events/concerts) and only 4 regions (深圳/廣州/中山/珠海). Discovered site now has a dedicated `hotel_packages.php?lang=tc` page that is site-curated as hotel-only.
+- **Key changes**:
+  - `BASE_URL`: `promotions.php` → **`hotel_packages.php?lang=tc`**
+  - `INCLUDE_REGIONS = ["深圳", "廣州", "中山", "珠海"]` — new whitelist constant
+  - `EXCLUDE_KEYWORDS` trimmed from 14 → 3 (保留 `滑雪`, `雪場`, `雪場套票` only — 廣州 滑雪套票依 SCOPE §3.2 排除)
+  - `MAX_PAGES`: 3 → 1 (page has no pagination)
+  - **LLM removed entirely** — `SYSTEM_PROMPT`, `call_llm()`, `_call_single_run()`, `_intersect_runs()`, `_parse_llm_json()`, `_validate_urls()`, `_drop_invalid_urls()`, `_invoke_model()` all deleted. `main()` order: `scrape_all_pages → compute_hash → prefilter (region+keywords+expired) → fetch_detail_pages → post_to_discord`
+  - `parse_promotion()` rewritten for card grid HTML (`<a class="package-wrapper">` containing `<h3 class="package-card-title">`, `<span class="package-location">📍 City</span>`, `<span class="package-price">$XXX</span>`)
+  - New `fetch_detail_pages()` — parallel `ThreadPoolExecutor(max_workers=4)` fetch of detail pages (`promotions.php?id=XXX`) to enrich each card with `date` / `nights` / `dining` / `transport` / `room_type`
+  - Discord message now **groups by region** (header: 「🏨 環島中港通 深圳 / 中山 / 珠海 酒店套票快訊」); per-card entry includes detail-page enriched fields
+  - Golden set rewritten: 11 include (8 深圳 + 2 中山 + 1 珠海) / 9 exclude (2 ski + 4 region-excluded + 2 expired + 1 non-hotel)
+  - Tests rewritten: 56 → 60 tests; removed `TestParseLlmJson` (4) + `TestIntersectRuns` (4) + `TestResponseFormatFallback` (3) + `TestUrlValidation` (4); added `TestHotelCardParser` (4) + `TestRegionFilter` (6) + `TestSkiExclusion` (3) + `TestFetchDetailPages` (3)
+- **Validation**:
+  - ✅ `python -m py_compile scrape_and_notify.py`
+  - ✅ `python -m unittest tests.test_t9` — **60/60 pass**
+  - ✅ `python -m evaluation.evaluate` — **20/20 (100%)**
+- **Workflow**: `.github/workflows/hotel-monitor.yml` **unchanged** — env vars still apply, `OPENROUTER_*` Variables retained for v1.4 future
+- **Risk**: Low — surgical refactor; `main()` call order preserved (modulo LLM removal); all v1.2 contracts documented in SCOPE §10 unchanged
+- **Rollback**: `git revert HEAD` — restores `promotions.php` target + LLM + original 56 tests + 20-entry golden set
+- **Note**: User explicitly chose "Trust site labels" (Path A) over LLM classification — accepts reduced semantic verification in exchange for simpler pipeline and zero API dependency
+
+---
+
 ## 2026-06-12 | [Hotfix — Venice 供應商不支援 `response_format`，3 模型全失敗]
 
 - **Scope**: `scrape_and_notify.py:715-803` (`_invoke_model` / `_call_single_run`) + `tests/test_t9.py:561-651` (新增 `TestResponseFormatFallback`)

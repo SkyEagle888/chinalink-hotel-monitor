@@ -1,5 +1,5 @@
 """
-T9.3.x / T9.4.x / T9.5.x 煙霧測試（T9 增強迭代）
+v1.3 煙霧測試（hotel_packages.php 目標 + 地區過濾 + 移除 LLM）
 
 執行：python -m unittest tests.test_t9 -v
 退出：0 = 全部通過；非 0 = 至少一個失敗
@@ -29,14 +29,58 @@ sys.path.insert(0, str(ROOT))
 import scrape_and_notify as san  # noqa: E402
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Helper：合成 hotel_packages.php 卡片 HTML
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _make_card_html(
+    title: str,
+    region: str,
+    price: str,
+    unit: str = " 起/位",
+    url: str = "https://www.tilchinalink.com/promotions.php?id=85&lang=tc",
+) -> str:
+    """合成單張 `<a class="package-wrapper">` 卡片的 HTML。"""
+    return (
+        f'<a href="{url}" class="package-wrapper is-link hotel-filter-item" '
+        f'data-filter="1">'
+        f'<div class="package-card">'
+        f'<div class="package-card-image">'
+        f'<img src="upload/{title}.jpg" alt="Hotel">'
+        f'<span class="package-location">📍 {region}</span>'
+        f'</div>'
+        f'<div class="package-card-body">'
+        f'<h3 class="package-card-title">{title}</h3>'
+        f'<div class="package-card-footer">'
+        f'<span class="package-price">{price}</span>'
+        f'<span class="package-unit">{unit}</span>'
+        f'</div>'
+        f'</div>'
+        f'</div>'
+        f'</a>'
+    )
+
+
+def _make_grid_html(cards: list[str]) -> str:
+    return (
+        '<html><body>'
+        '<div class="package-grid">'
+        + "".join(cards)
+        + '</div>'
+        '</body></html>'
+    )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# T9.3.1 — 日期 regex（保留）
+# ─────────────────────────────────────────────────────────────────────────────
+
 class TestExtractEndDates(unittest.TestCase):
     """T9.3.1：擴展日期 regex 覆蓋 slash / dash / 即日起 場景。"""
 
     def test_chinese_full_range(self):
         text = "有效期 2026年5月1日 至 2026年8月31日"
         dates = san.extract_end_dates(text, 2026)
-        # Range pattern + single-end pattern both match — duplicates are
-        # harmless; caller uses max(). Just verify the end date is present.
         self.assertIn(san._safe_date(2026, 8, 31), dates)
         self.assertGreaterEqual(len(dates), 1)
 
@@ -76,7 +120,6 @@ class TestExtractEndDates(unittest.TestCase):
         self.assertEqual(dates, [san._safe_date(2026, 12, 31)])
 
     def test_jiriqi_no_end_date(self):
-        """「即日起」不應被視為結束日期。"""
         text = "即日起接受預訂 入住豪華套房"
         dates = san.extract_end_dates(text, 2026)
         self.assertEqual(dates, [])
@@ -87,224 +130,270 @@ class TestExtractEndDates(unittest.TestCase):
         self.assertEqual(dates, [])
 
 
-class TestPrefilterWhitelist(unittest.TestCase):
-    """T9.3.2：正向白名單 + T9.4.3 啟發式第二輪。"""
+# ─────────────────────────────────────────────────────────────────────────────
+# v1.3 — 卡片解析
+# ─────────────────────────────────────────────────────────────────────────────
 
-    def test_hotel_keyword_match_zhusu(self):
-        p = {"title": "A", "content": "酒店住宿 1晚", "date": ""}
-        self.assertTrue(san.has_hotel_keyword(p))
+class TestHotelCardParser(unittest.TestCase):
+    """v1.3：解析 hotel_packages.php 的卡片網格結構。"""
 
-    def test_hotel_keyword_match_ruzhufang(self):
-        p = {"title": "A", "content": "標準房間", "date": ""}
-        self.assertTrue(san.has_hotel_keyword(p))
+    def test_parse_card_basic(self):
+        html = _make_card_html(
+            title="寶安登喜路國際大酒店套票",
+            region="深圳",
+            price="$365",
+            url="https://www.tilchinalink.com/promotions.php?id=85&lang=tc",
+        )
+        soup = __import__("bs4").BeautifulSoup(html, "html.parser")
+        anchor = soup.find("a", class_="package-wrapper")
+        promo = san.parse_promotion(anchor)
+        self.assertIsNotNone(promo)
+        self.assertEqual(promo["title"], "寶安登喜路國際大酒店套票")
+        self.assertEqual(promo["region"], "深圳")
+        self.assertIn("365", promo["price"])
+        self.assertEqual(
+            promo["url"], "https://www.tilchinalink.com/promotions.php?id=85&lang=tc"
+        )
 
-    def test_hotel_keyword_match_fang(self):
-        """單字「房」應匹配（套房、家庭房、大床房 等）。"""
-        for kw in ["套房", "家庭房", "大床房", "標準房"]:
-            p = {"title": "A", "content": f"豪華{kw}", "date": ""}
-            self.assertTrue(san.has_hotel_keyword(p), f"missed: {kw}")
+    def test_parse_card_no_title_returns_none(self):
+        html = (
+            '<a href="https://x.com" class="package-wrapper">'
+            '<div class="package-card-body"></div>'
+            '</a>'
+        )
+        soup = __import__("bs4").BeautifulSoup(html, "html.parser")
+        anchor = soup.find("a", class_="package-wrapper")
+        self.assertIsNone(san.parse_promotion(anchor))
 
-    def test_hotel_keyword_no_match(self):
-        p = {"title": "花山站點", "content": "新增上車站點", "date": ""}
-        self.assertFalse(san.has_hotel_keyword(p))
+    def test_parse_card_no_url_returns_none(self):
+        html = (
+            '<a class="package-wrapper">'
+            '<h3 class="package-card-title">A</h3>'
+            '</a>'
+        )
+        soup = __import__("bs4").BeautifulSoup(html, "html.parser")
+        anchor = soup.find("a", class_="package-wrapper")
+        self.assertIsNone(san.parse_promotion(anchor))
 
-    def test_prefilter_2nd_round_threshold(self):
-        """候選 ≥ 3 且非住宿+餐飲雙命中 → 排除。"""
+    def test_parse_grid_multiple_cards(self):
+        cards = [
+            _make_card_html(f"酒店套票 {i}", r, f"${100 + i}",
+                           url=f"https://www.tilchinalink.com/promotions.php?id={i}")
+            for i, r in enumerate(["深圳", "廣州", "中山", "珠海"], start=1)
+        ]
+        html = _make_grid_html(cards)
+        soup = __import__("bs4").BeautifulSoup(html, "html.parser")
+        promos = []
+        for anchor in soup.find_all("a", class_="package-wrapper"):
+            p = san.parse_promotion(anchor)
+            if p:
+                promos.append(p)
+        self.assertEqual(len(promos), 4)
+        self.assertEqual([p["region"] for p in promos],
+                         ["深圳", "廣州", "中山", "珠海"])
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# v1.3 — 地區過濾
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TestRegionFilter(unittest.TestCase):
+    """v1.3：region_allowed() 與 INCLUDE_REGIONS 白名單。"""
+
+    def test_region_included(self):
+        for r in san.INCLUDE_REGIONS:
+            self.assertTrue(san.region_allowed({"region": r}))
+
+    def test_region_excluded(self):
+        for r in ["惠州", "佛山", "肇慶", "東莞"]:
+            self.assertFalse(san.region_allowed({"region": r}))
+
+    def test_empty_region_passes(self):
+        """向後相容：舊黃金集無 region 欄位時預設放行。"""
+        self.assertTrue(san.region_allowed({}))
+        self.assertTrue(san.region_allowed({"title": "A"}))
+
+    def test_group_by_region_order(self):
+        packages = [
+            {"title": "A", "region": "珠海"},
+            {"title": "B", "region": "深圳"},
+            {"title": "C", "region": "中山"},
+        ]
+        grouped = san.group_by_region(packages)
+        regions = [r for r, _ in grouped]
+        self.assertEqual(regions, ["深圳", "中山", "珠海"])
+
+    def test_sort_by_region(self):
+        packages = [
+            {"title": "A", "region": "珠海"},
+            {"title": "B", "region": "深圳"},
+        ]
+        sorted_pkgs = san.sort_by_region(packages)
+        self.assertEqual([p["title"] for p in sorted_pkgs], ["B", "A"])
+
+    def test_region_rank_complete(self):
+        for i, r in enumerate(san.INCLUDE_REGIONS):
+            self.assertEqual(san.REGION_RANK[r], i)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# v1.3 — 滑雪排除 + 預篩選
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TestSkiExclusion(unittest.TestCase):
+    """v1.3：滑雪套票透過 EXCLUDE_KEYWORDS 排除。"""
+
+    def test_snow_keyword_excluded(self):
         promos = [
-            {"title": "A", "content": "酒店住宿 1晚 純住宿", "date": "2026-06-01"},
-            {"title": "B", "content": "酒店住宿 1晚 純住宿", "date": "2026-06-01"},
-            {"title": "C", "content": "酒店住宿 1晚 純住宿", "date": "2026-06-01"},
-            {"title": "D", "content": "酒店住宿 1晚 + 自助早餐", "date": "2026-06-01"},
+            {
+                "title": "廣州融創花間堂•悅雪酒店+滑雪套票",
+                "region": "廣州",
+                "date": "2026-06-01",
+                "content": "",
+                "url": "https://www.tilchinalink.com/promotions.php?id=110",
+            }
         ]
         filtered, excluded = san.prefilter(promos)
-        self.assertEqual(len(filtered), 1)
-        self.assertEqual(filtered[0]["title"], "D")
-        self.assertEqual(excluded, 3)
-
-    def test_prefilter_2nd_round_below_threshold(self):
-        """候選 < 3 → 不啟動第二輪。"""
-        promos = [
-            {"title": "A", "content": "酒店住宿 1晚 純住宿", "date": "2026-06-01"},
-            {"title": "B", "content": "酒店住宿 1晚 + 自助早餐", "date": "2026-06-01"},
-        ]
-        filtered, _ = san.prefilter(promos)
-        self.assertEqual(len(filtered), 2)
-
-    def test_prefilter_exclude_keyword(self):
-        p = {
-            "title": "郭富城演唱會套票",
-            "content": "酒店住宿 + 演唱會門票 + 早餐",
-            "date": "2026-06-01",
-        }
-        filtered, excluded = san.prefilter([p])
         self.assertEqual(len(filtered), 0)
         self.assertEqual(excluded, 1)
 
+    def test_snow_venue_keyword_excluded(self):
+        promos = [
+            {
+                "title": "花都融創施柏閣酒店+滑雪套票",
+                "region": "廣州",
+                "date": "2026-06-01",
+                "content": "雪場",
+                "url": "https://www.tilchinalink.com/promotions.php?id=110",
+            }
+        ]
+        filtered, _ = san.prefilter(promos)
+        self.assertEqual(len(filtered), 0)
+
+    def test_non_snow_kept(self):
+        promos = [
+            {
+                "title": "中山喜來登酒店套票",
+                "region": "中山",
+                "date": "2026-06-01",
+                "content": "住宿 1晚 標準房",
+                "url": "https://www.tilchinalink.com/promotions.php?id=161",
+            }
+        ]
+        filtered, _ = san.prefilter(promos)
+        self.assertEqual(len(filtered), 1)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# v1.3 — 預篩選（含地區 + 過期 + 關鍵詞）
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TestPrefilterWhitelist(unittest.TestCase):
+    """v1.3 預篩選：地區 + 過期 + 關鍵詞 + 住宿白名單。"""
+
+    def _make(self, region, title, date="2026-06-01", content="住宿 1晚"):
+        return {
+            "title": title,
+            "region": region,
+            "date": date,
+            "content": content,
+            "url": "https://www.tilchinalink.com/promotions.php?id=1",
+        }
+
+    def test_hotel_keyword_match_zhusu(self):
+        p = self._make("深圳", "A", content="酒店住宿 1晚")
+        self.assertTrue(san.has_hotel_keyword(p))
+
+    def test_hotel_keyword_match_ruzhufang(self):
+        p = self._make("深圳", "A", content="標準房間")
+        self.assertTrue(san.has_hotel_keyword(p))
+
+    def test_hotel_keyword_match_fang(self):
+        for kw in ["套房", "家庭房", "大床房", "標準房"]:
+            p = self._make("深圳", "A", content=f"豪華{kw}")
+            self.assertTrue(san.has_hotel_keyword(p), f"missed: {kw}")
+
+    def test_hotel_keyword_no_match(self):
+        p = self._make("深圳", "花山站點", content="新增上車站點")
+        self.assertFalse(san.has_hotel_keyword(p))
+
+    def test_region_filter_blocks_other_regions(self):
+        p = self._make("惠州", "惠州皇冠假日酒店套票", content="住宿 1晚")
+        filtered, _ = san.prefilter([p])
+        self.assertEqual(len(filtered), 0)
+
     def test_prefilter_expired(self):
-        """發布日期 > 180 天前且無結束日期 → 過期排除。"""
-        p = {
-            "title": "A",
-            "content": "酒店住宿 + 自助早餐",
-            "date": "2025-01-01",
-        }
+        p = self._make("深圳", "A", date="2025-01-01", content="住宿 1晚")
         filtered, _ = san.prefilter([p])
         self.assertEqual(len(filtered), 0)
 
-    def test_prefilter_whitelist_blocks_pickup_hotel(self):
-        """酒店名僅為上落車地點（無住宿關鍵字）→ 排除。"""
-        p = {
-            "title": "花山希爾頓歡朋酒店 接送",
-            "content": "花山希爾頓歡朋酒店為新登車站點，買去程送回程",
-            "date": "2026-06-01",
-        }
-        filtered, _ = san.prefilter([p])
-        self.assertEqual(len(filtered), 0)
+    def test_prefilter_keeps_pickup_hotel_now_passes(self):
+        """v1.3 行為變更：hotel_packages.php 已策展，不再依賴 has_hotel_keyword 白名單。
 
-
-class TestUrlValidation(unittest.TestCase):
-    """T9.3.3：輸出驗證層。"""
-
-    def test_valid_urls(self):
-        data = {
-            "packages": [
-                {"url": "https://www.tilchinalink.com/promotions.php?id=201"},
-                {"url": "https://www.tilchinalink.com/promotions.php?id=205"},
-            ],
-            "excluded_count": 0,
-        }
-        self.assertEqual(san._validate_urls(data), [])
-
-    def test_missing_url(self):
-        data = {
-            "packages": [{"url": "", "title": "A"}],
-            "excluded_count": 0,
-        }
-        self.assertEqual(san._validate_urls(data), ["A"])
-
-    def test_url_without_id(self):
-        data = {
-            "packages": [{"url": "https://example.com/foo", "title": "B"}],
-            "excluded_count": 0,
-        }
-        self.assertEqual(san._validate_urls(data), ["B"])
-
-    def test_drop_invalid(self):
-        data = {
-            "packages": [
-                {"url": "https://x.com/p?id=1", "title": "ok"},
-                {"url": "", "title": "bad"},
-            ],
-            "excluded_count": 0,
-        }
-        out = san._drop_invalid_urls(data)
-        self.assertEqual(len(out["packages"]), 1)
-        self.assertEqual(out["packages"][0]["title"], "ok")
-        self.assertEqual(out["excluded_count"], 1)
-
-
-class TestIntersectRuns(unittest.TestCase):
-    """T9.5.3：self-consistency 交集邏輯。"""
-
-    def test_intersection_common(self):
-        runs = [
-            {"packages": [
-                {"url": "u1", "title": "A"},
-                {"url": "u2", "title": "B"},
-            ], "excluded_count": 0},
-            {"packages": [
-                {"url": "u1", "title": "A"},
-                {"url": "u3", "title": "C"},
-            ], "excluded_count": 1},
-        ]
-        result = san._intersect_runs(runs)
-        urls = {p["url"] for p in result["packages"]}
-        self.assertEqual(urls, {"u1"})
-        self.assertEqual(result["excluded_count"], 1)
-
-    def test_intersection_empty_fallback(self):
-        """交集為空 → fallback 第一輪（避免 false negative）。"""
-        runs = [
-            {"packages": [{"url": "u1", "title": "A"}], "excluded_count": 0},
-            {"packages": [{"url": "u2", "title": "B"}], "excluded_count": 0},
-        ]
-        result = san._intersect_runs(runs)
-        self.assertEqual(len(result["packages"]), 1)
-        self.assertEqual(result["packages"][0]["url"], "u1")
-
-    def test_single_run(self):
-        runs = [{"packages": [{"url": "u1"}], "excluded_count": 0}]
-        result = san._intersect_runs(runs)
-        self.assertEqual(len(result["packages"]), 1)
-
-    def test_empty_runs(self):
-        result = san._intersect_runs([])
-        self.assertEqual(result["packages"], [])
-        self.assertEqual(result["excluded_count"], 0)
-
-
-class TestParseLlmJson(unittest.TestCase):
-    """T9.2.2：JSON 解析容錯（已實作，本測試確保未來變更不破壞）。"""
-
-    def test_well_formed(self):
-        raw = json.dumps({
-            "packages": [
-                {
-                    "title": "測試",
-                    "validity": "持續有效",
-                    "price": "HK$100",
-                    "dining": "自助早餐",
-                    "nights": 2,
-                    "room_type": "標準房",
-                    "booking": "微信",
-                    "note": "備注",
-                    "url": "https://x.com/p?id=1",
-                }
-            ],
-            "excluded_count": 3,
-        })
-        out = san._parse_llm_json(raw)
-        self.assertEqual(len(out["packages"]), 1)
-        self.assertEqual(out["packages"][0]["nights"], 2)
-        self.assertEqual(out["excluded_count"], 3)
-
-    def test_missing_fields_default(self):
-        out = san._parse_llm_json(json.dumps({"packages": [{}], "excluded_count": 0}))
-        p = out["packages"][0]
-        self.assertEqual(p["validity"], "持續有效")
-        self.assertEqual(p["price"], "請查閱官網")
-        self.assertEqual(p["nights"], 1)
-
-    def test_invalid_json_raises(self):
-        with self.assertRaises(RuntimeError):
-            san._parse_llm_json("not json")
-
-    def test_excluded_count_bool_rejected(self):
-        out = san._parse_llm_json(
-            json.dumps({"packages": [], "excluded_count": True})
+        在 v1.2 中，「花山希爾頓歡朋酒店 接送」會被 has_hotel_keyword 排除（無「住宿/入住/房間/房」）。
+        v1.3 改為信任網站策展（hotel_packages.php 頁面只列酒店套票），故此類合成輸入會通過。
+        真實生產中 hotel_packages.php 不會出現此類條目。
+        """
+        p = self._make(
+            "深圳",
+            "花山希爾頓歡朋酒店 接送",
+            content="花山希爾頓歡朋酒店為新登車站點，買去程送回程",
         )
-        self.assertEqual(out["excluded_count"], 0)
+        filtered, _ = san.prefilter([p])
+        self.assertEqual(len(filtered), 1)
 
+    def test_prefilter_keeps_valid(self):
+        p = self._make(
+            "深圳",
+            "寶安登喜路國際大酒店套票",
+            content="住宿 1晚 標準房",
+        )
+        filtered, _ = san.prefilter([p])
+        self.assertEqual(len(filtered), 1)
+
+    def test_prefilter_empty_region_passes_region(self):
+        """無 region 欄位（向後相容）→ 通過地區檢查。"""
+        p = {"title": "A", "date": "2026-06-01", "content": "住宿 1晚"}
+        filtered, _ = san.prefilter([p])
+        self.assertEqual(len(filtered), 1)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# T9.x — 常數預設值（更新為 v1.3）
+# ─────────────────────────────────────────────────────────────────────────────
 
 class TestConstants(unittest.TestCase):
-    """T9.x 配置常數預設值驗證。"""
 
-    def test_self_consistency_default(self):
-        self.assertEqual(san.SELF_CONSISTENCY_RUNS, 2)
+    def test_base_url_hotel_packages(self):
+        self.assertEqual(
+            san.BASE_URL,
+            "https://www.tilchinalink.com/hotel_packages.php?lang=tc",
+        )
 
-    def test_url_retry_default(self):
-        self.assertEqual(san.URL_RETRY_LIMIT, 1)
+    def test_max_pages_is_one(self):
+        self.assertEqual(san.MAX_PAGES, 1)
 
-    def test_heuristic_threshold(self):
-        self.assertEqual(san.HEURISTIC_2ND_ROUND_THRESHOLD, 3)
+    def test_include_regions(self):
+        self.assertEqual(san.INCLUDE_REGIONS, ["深圳", "廣州", "中山", "珠海"])
 
-    def test_hotel_keywords_include_fang(self):
-        for kw in ["住宿", "入住", "房間", "房"]:
-            self.assertIn(kw, san.HOTEL_KEYWORDS)
+    def test_exclude_keywords_only_snow(self):
+        self.assertEqual(san.EXCLUDE_KEYWORDS, ["滑雪", "雪場", "雪場套票"])
 
+    def test_promo_stale_default(self):
+        self.assertEqual(san.PROMO_STALE_DAYS, 180)
+
+    def test_discord_retry_max(self):
+        self.assertEqual(san.DISCORD_RETRY_MAX, 3)
+
+    def test_detail_fetch_workers_default(self):
+        self.assertEqual(san.DETAIL_FETCH_WORKERS, 4)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# T9.6.2 — 結構化日誌
+# ─────────────────────────────────────────────────────────────────────────────
 
 class TestStructuredLogging(unittest.TestCase):
-    """T9.6.2：結構化 JSON 日誌。"""
-
     def setUp(self):
         self.records: list[str] = []
 
@@ -350,9 +439,11 @@ class TestStructuredLogging(unittest.TestCase):
         self.assertTrue(all(c in "0123456789abcdef" for c in san.RUN_ID))
 
 
-class TestPromoDiff(unittest.TestCase):
-    """T9.6.3：promo 持久化 + diff 計算。"""
+# ─────────────────────────────────────────────────────────────────────────────
+# T9.6.3 — promo 持久化 + diff
+# ─────────────────────────────────────────────────────────────────────────────
 
+class TestPromoDiff(unittest.TestCase):
     def setUp(self):
         self._tmpdir = Path(tempfile.mkdtemp())
         self._orig_promos_file = san.PROMOS_FILE
@@ -392,7 +483,6 @@ class TestPromoDiff(unittest.TestCase):
         self.assertEqual(diff["removed"], [])
 
     def test_diff_title_change_not_counted(self):
-        """同一 URL 標題變更不視為新增/移除。"""
         old = [{"url": "https://x.com/?id=1", "title": "舊標題"}]
         new = [{"url": "https://x.com/?id=1", "title": "新標題"}]
         diff = san.compute_promo_diff(old, new)
@@ -427,9 +517,11 @@ class TestPromoDiff(unittest.TestCase):
             self.assertEqual(len(h), 16)
 
 
-class TestDiscordRetry(unittest.TestCase):
-    """T9.6.1：Discord Webhook 重試 + exponential backoff。"""
+# ─────────────────────────────────────────────────────────────────────────────
+# T9.6.1 — Discord 重試
+# ─────────────────────────────────────────────────────────────────────────────
 
+class TestDiscordRetry(unittest.TestCase):
     def setUp(self):
         self._orig_dry = san.DRY_RUN
         self._orig_max = san.DISCORD_RETRY_MAX
@@ -498,7 +590,6 @@ class TestDiscordRetry(unittest.TestCase):
         self.assertEqual(failed[0]["attempts"], san.DISCORD_RETRY_MAX)
 
     def test_exponential_backoff_timing(self):
-        """第 N 次失敗後等待 base**N 秒。"""
         san.DISCORD_RETRY_BACKOFF = 2
         with mock.patch("scrape_and_notify.requests.post") as mp:
             mp.side_effect = requests.ConnectionError("net")
@@ -509,9 +600,11 @@ class TestDiscordRetry(unittest.TestCase):
             self.assertEqual(waits, [2, 4])
 
 
-class TestDryRun(unittest.TestCase):
-    """T9.6.5：DRY_RUN 環境變量支持。"""
+# ─────────────────────────────────────────────────────────────────────────────
+# T9.6.5 — DRY_RUN
+# ─────────────────────────────────────────────────────────────────────────────
 
+class TestDryRun(unittest.TestCase):
     def setUp(self):
         self._orig_dry = san.DRY_RUN
         self.events: list[str] = []
@@ -553,114 +646,54 @@ class TestDryRun(unittest.TestCase):
         os.environ.pop("DRY_RUN", None)
 
 
-class TestResponseFormatFallback(unittest.TestCase):
-    """當供應商（如 Venice）不支援 `response_format` 時，應無縫改用 prompt-only JSON。"""
+# ─────────────────────────────────────────────────────────────────────────────
+# v1.3 — fetch_detail_page / fetch_detail_pages
+# ─────────────────────────────────────────────────────────────────────────────
 
-    def setUp(self):
-        self._orig_self_consistency = san.SELF_CONSISTENCY_RUNS
-        san.SELF_CONSISTENCY_RUNS = 1
-        self.events: list[str] = []
+class TestFetchDetailPages(unittest.TestCase):
+    """v1.3：並行 detail-page 抓取與 enrich。"""
 
-        class _Capture(logging.Handler):
-            def emit(self, record):
-                self.events.append(record.getMessage())
+    def test_fetch_detail_page_extracts_date(self):
+        html = (
+            '<html><body>'
+            '<div class="faintivory-background">'
+            '<h3>深圳酒店套票</h3>'
+            '<div>發布日期: 2026-05-12</div>'
+            '<p>車票+住宿+自助餐人均低至HK$315起</p>'
+            '</div>'
+            '</body></html>'
+        )
+        with mock.patch("scrape_and_notify.requests.get") as mg:
+            mg.return_value.status_code = 200
+            mg.return_value.text = html
+            result = san.fetch_detail_page("https://x.com")
+        self.assertEqual(result["date"], "2026-05-12")
+        self.assertIn("自助餐", result["dining"])
+        self.assertIn("直通巴士", result["transport"])
+        self.assertIsNone(result["nights"])
 
-        self._capture = _Capture()
-        self._capture.events = self.events
-        san._STRUCT_LOGGER.addHandler(self._capture)
+    def test_fetch_detail_page_handles_404(self):
+        with mock.patch("scrape_and_notify.requests.get") as mg:
+            mg.side_effect = requests.ConnectionError("net")
+            result = san.fetch_detail_page("https://x.com")
+        self.assertEqual(result["date"], "")
+        self.assertIsNone(result["dining"])
 
-    def tearDown(self):
-        san.SELF_CONSISTENCY_RUNS = self._orig_self_consistency
-        san._STRUCT_LOGGER.removeHandler(self._capture)
-
-    def _events_of(self, name: str) -> list[dict]:
-        return [
-            json.loads(line) for line in self.events
-            if line.startswith("{") and f'"event": "{name}"' in line
+    def test_fetch_detail_pages_dedupes_urls(self):
+        promos = [
+            {"url": "https://x.com/a", "title": "A"},
+            {"url": "https://x.com/b", "title": "B"},
+            {"url": "https://x.com/a", "title": "A2"},
         ]
-
-    def _make_response(self, payload: str):
-        resp = mock.Mock()
-        resp.choices = [mock.Mock()]
-        resp.choices[0].message.content = payload
-        resp.usage = None
-        return resp
-
-    def test_fallback_on_response_format_400(self):
-        """首次使用 JSON 模式失敗 → 自動重試無 response_format。"""
-        unsupported_err = Exception(
-            "Error code: 400 - response_format is not supported by this model"
-        )
-        good_payload = json.dumps({
-            "packages": [
-                {
-                    "title": "測試酒店套票",
-                    "validity": "持續有效",
-                    "price": "HK$999",
-                    "dining": "自助早餐",
-                    "nights": 1,
-                    "room_type": "標準房",
-                    "booking": "微信小程式",
-                    "note": "",
-                    "url": "https://www.tilchinalink.com/promotions.php?id=999",
-                }
-            ],
-            "excluded_count": 0,
-        })
-
-        with mock.patch("scrape_and_notify._invoke_model") as im:
-            im.side_effect = [unsupported_err, self._make_response(good_payload)]
-            with mock.patch("scrape_and_notify.time.sleep"):
-                result = san._call_single_run("dummy content")
-
-        self.assertEqual(im.call_count, 2)
-        self.assertEqual(
-            im.call_args_list[0].kwargs["use_response_format"], True
-        )
-        self.assertEqual(
-            im.call_args_list[1].kwargs["use_response_format"], False
-        )
-        self.assertEqual(len(result["packages"]), 1)
-        self.assertEqual(result["packages"][0]["title"], "測試酒店套票")
-
-        fallback = self._events_of("llm.response_format_fallback")
-        self.assertEqual(len(fallback), 1)
-        self.assertEqual(fallback[0]["model"], san.MODELS[0])
-
-    def test_non_response_format_error_skips_fallback(self):
-        """非 response_format 錯誤（如 5xx）不觸發 fallback，直接換下一模型。"""
-        other_err = Exception("Error code: 503 - upstream unavailable")
-        with mock.patch("scrape_and_notify._invoke_model") as im:
-            im.side_effect = other_err
-            with mock.patch("scrape_and_notify.time.sleep"):
-                with self.assertRaises(RuntimeError) as ctx:
-                    san._call_single_run("dummy content")
-        self.assertEqual(im.call_count, len(san.MODELS))
-        self.assertIn("所有 LLM 模型均失敗", str(ctx.exception))
-        self.assertEqual(self._events_of("llm.response_format_fallback"), [])
-
-    def test_fallback_failure_moves_to_next_model(self):
-        """response_format fallback 重試亦失敗時，移至下一個備用模型。"""
-        unsupported_err = Exception(
-            "Error code: 400 - response_format is not supported by this model"
-        )
-        secondary_err = Exception("Error code: 500 - persistent failure")
-        good_payload = json.dumps({"packages": [], "excluded_count": 0})
-
-        with mock.patch("scrape_and_notify._invoke_model") as im:
-            im.side_effect = [
-                unsupported_err, secondary_err,
-                self._make_response(good_payload),
-            ]
-            with mock.patch("scrape_and_notify.time.sleep"):
-                result = san._call_single_run("dummy content")
-
-        self.assertEqual(im.call_count, 3)
-        self.assertEqual(result["packages"], [])
-
-        fallback = self._events_of("llm.response_format_fallback")
-        self.assertEqual(len(fallback), 1)
-        self.assertEqual(fallback[0]["model"], san.MODELS[0])
+        with mock.patch("scrape_and_notify.fetch_detail_page") as fdp:
+            fdp.return_value = {
+                "url": "", "date": "2026-06-01",
+                "summary": "", "nights": None,
+                "dining": None, "transport": None, "room_type": None,
+            }
+            enriched = san.fetch_detail_pages(promos)
+        self.assertEqual(len(enriched), 3)
+        self.assertEqual(fdp.call_count, 2)
 
 
 def _parse_dry_run_env() -> bool:

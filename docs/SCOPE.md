@@ -1,10 +1,12 @@
 # Requirements.md — 環島中港通酒店套票監察系統
 
-> **目標網址：** https://www.tilchinalink.com/promotions.php  
-> **監察範圍：** 酒店套票（酒店住宿 + 車費 + 自助餐/早餐）  
-> **技術棧：** GitHub Actions + Python + OpenRouter（免費模型）+ Discord Webhook  
-> **版本：** 1.1 | 27 April 2026  
+> **目標網址：** https://www.tilchinalink.com/hotel_packages.php?lang=tc  
+> **監察範圍：** 酒店套票（酒店住宿 + 車費 + 自助餐/早餐）— 僅 深圳 / 廣州 / 中山 / 珠海  
+> **技術棧：** GitHub Actions + Python + Discord Webhook  
+> **版本：** 1.3 | 17 June 2026  
 > **語言：** 繁體中文輸出
+
+> 📌 **v1.3 重大變更（§11）**：目標網址由 `promotions.php` 切換至 `hotel_packages.php?lang=tc`，並加入地區白名單過濾；不再調用 LLM（依網站策展信任）。詳見 §11。
 
 ---
 
@@ -22,7 +24,7 @@
 
 | 屬性 | 詳情 |
 |---|---|
-| **網址** | https://www.tilchinalink.com/promotions.php |
+| **網址** | https://www.tilchinalink.com/hotel_packages.php?lang=tc |
 | **公司** | 環島中港通 / Trans-Island Chinalink |
 | **預設語言** | 繁體中文（預設）；英文版本可透過 `?lang=en` 取得 |
 | **抓取版本** | 繁體中文版本（預設 URL，不加 `?lang=en`） |
@@ -55,8 +57,10 @@
 - 各優惠之間無語義化 HTML 容器（如 `<article>`、`<section>`）— 以純文字段落及 `...` 分隔
 - 無 JSON-LD / 結構化 Schema 標記
 - 已過期優惠仍保留在頁面上，並無任何「已過期」標示 — 日期驗證至關重要
-- 個別優惠 URL 格式：`https://www.tilchinalink.com/promotions.php?id=XXX`
+- 個別優惠 URL 格式：`https://www.tilchinalink.com/promotions.php?id=XXX`（`hotel_packages.php` 之卡片連結）
+- 卡片結構：`<a class="package-wrapper" href="…?id=XXX">` 內含 `<h3 class="package-card-title">`、`📍 <span class="package-location">城市</span>`、`<span class="package-price">$XXX</span>`
 - 抓取時須從頁面鏈接中提取各優惠的 `id` 參數，以便在通知中提供直接連結
+- 詳情頁（`promotions.php?id=XXX`）含 `<div class="faintivory-background">`，內有發布日期 `發布日期: YYYY-MM-DD` 與套票說明
 
 ---
 
@@ -98,8 +102,8 @@
 
 | ID | 需求 |
 |---|---|
-| FR-1.1 | 以 HTTP GET 方式抓取 `https://www.tilchinalink.com/promotions.php`（繁體中文版本，不加 `?lang=en`） |
-| FR-1.2 | 同時抓取第 2、3 頁（`?page=2`、`?page=3`）以獲取較舊的有效優惠 |
+| FR-1.1 | 以 HTTP GET 方式抓取 `https://www.tilchinalink.com/hotel_packages.php?lang=tc`（繁體中文版本） |
+| FR-1.2 | 不分頁（v1.3 觀察：頁面無 `?page=` 鏈接；如未來出現分頁，預留 `MAX_PAGES` 環境變量） |
 | FR-1.3 | 若整頁優惠均早於 6 個月前發布，則停止翻頁 |
 | FR-1.4 | 在 HTTP 請求標頭中設置有效的瀏覽器 `User-Agent` |
 | FR-1.5 | 設置 30 秒請求超時；遇 `ConnectionError` 或 HTTP 5xx 時重試一次 |
@@ -369,4 +373,131 @@ OpenRouter 免費模型限制：每分鐘 20 個請求，每日 200 個請求。
 
 ---
 
-*版本 1.1 | 27 April 2026 | 環島中港通酒店套票監察系統 | Henry Fok / Legato Technologies Limited*
+## 11. v1.3 增強提案 — 目標網址切換 + 地區白名單（已完成 2026-06-17）
+
+> **狀態**：已實作並通過驗證（60 單元測試 + 20/20 黃金集）。實作記錄見 `docs/PLAN.md` T10 + `docs/CHANGE-LOG.md`。  
+> **動機**：v1.2 持續運行期間觀察到：(a) 網站新增 `hotel_packages.php` 頁面，網站自身已策展為「酒店套票」專屬頁；(b) 用戶希望僅監察 深圳/廣州/中山/珠海 4 個地區。  
+> **範圍**：本節取代 v1.1 的 §2.1（網址）、§4 FR-1.1（抓取目標）與 §7（Discord 訊息按地區分組）。其他章節（§3 合資格條件、§5 NFR、§6 模型推薦）仍以 v1.2 為準 — v1.3 不再使用 OpenRouter LLM，§6 的模型備用鏈自 v1.3 起標記為「保留供未來 v1.4 擴展」。
+
+### 11.1 目標網址變更（v1.3）
+
+| 屬性 | v1.2 | v1.3 |
+|---|---|---|
+| **目標網址** | `promotions.php` | **`hotel_packages.php?lang=tc`** |
+| **頁面性質** | 混合優惠（演唱會/主題公園/純車費/酒店套票/充值優惠） | **酒店套票專屬**（網站策展） |
+| **抓取難度** | 🟢 低（PHP 服務器渲染） | 🟢 低 |
+| **分頁** | `?page=2`/`?page=3` | **不分頁**（`MAX_PAGES=1`） |
+| **LLM 角色** | 必要（從混合內容中分類） | **不再使用**（頁面已策展） |
+| **每張卡片連結** | `promotions.php?id=XXX` | `promotions.php?id=XXX`（相同） |
+
+### 11.2 地區白名單（v1.3 新增）
+
+依用戶指定，僅監察以下 4 個地區之卡片：
+
+| 地區 | 優先級 | 卡片數（2026-06-17 觀察） |
+|---|---|---|
+| 深圳 | 1 | 8 |
+| 廣州 | 2 | 2（皆為滑雪套票，被 v1.3 §11.3 排除） |
+| 中山 | 3 | 2 |
+| 珠海 | 4 | 1 |
+| **最終每日保留** | — | **11** |
+
+- `INCLUDE_REGIONS = ["深圳", "廣州", "中山", "珠海"]`（常數，位於 `scrape_and_notify.py`）
+- `region_allowed(promo)` 在 `prefilter()` 之第一步執行
+- Discord 訊息 header 動態顯示「**深圳 / 中山 / 珠海 酒店套票快訊**」（廣州 0 張時省略）
+
+### 11.3 排除關鍵詞精簡（v1.3）
+
+v1.2 的 `EXCLUDE_KEYWORDS`（演唱會/主題公園/充值優惠等共 14 條）在 v1.3 大幅精簡，**僅保留與 hotel_packages.php 相關之排除**：
+
+| 保留 | 排除原因 |
+|---|---|
+| `滑雪` | 滑雪套票（如廣州融創花間堂+滑雪、花都融創施柏閣+滑雪）— 屬「雪場套票」，依 v1.2 §3.2 排除 |
+| `雪場` | 同上 |
+| `雪場套票` | 同上 |
+
+v1.2 的其他排除（演唱會、主題公園、純車費、充值優惠、行李托運等）已無需 — `hotel_packages.php` 頁面只列酒店套票，無混合內容。
+
+### 11.4 Detail-page 抓取（v1.3 新增）
+
+每張保留卡片對應一個詳情頁（`promotions.php?id=XXX`）。v1.3 新增 `fetch_detail_pages()` 並行抓取所有 unique 詳情頁，提取：
+
+- `發布日期: YYYY-MM-DD`（用於 `is_expired()` 判斷）
+- `nights`（如「1晚」「2晚」）
+- `dining`（如「自助餐」「早餐」）
+- `transport`（如「直通巴士」）
+- `room_type`（如「標準房」「大床房」）
+
+抓取細節：
+- `ThreadPoolExecutor(max_workers=DETAIL_FETCH_WORKERS=4)`（env 可調）
+- `DETAIL_FETCH_TIMEOUT=15s`（env 可調）
+- 失敗時 fallback 為 card-only 顯示（`請查閱官網` 標記）
+- 11 張卡片 / 4 unique URL → 預計 <2 秒（受 1.5s politeness 影響）
+
+### 11.5 Discord 訊息格式變更（v1.3）
+
+v1.2 訊息為單一列表；v1.3 改為按地區分組：
+
+```
+🏨 環島中港通 深圳 / 中山 / 珠海 酒店套票快訊 | 17/06/2026
+
+━━ 深圳（8 個套票）━━
+
+🏨 **寶安登喜路國際大酒店套票**
+💰 價格：HK$365 起/位
+🛏️ 住宿：1 晚，標準房
+🍽️ 餐飲：自助早餐
+🚍 交通：直通巴士
+📅 發布：2026-05-12
+🔗 優惠詳情：https://www.tilchinalink.com/promotions.php?id=85&lang=tc
+
+🏨 **深圳同泰萬怡酒店套票**
+…
+
+━━ 中山（2 個套票）━━
+
+🏨 **中山石岐步行街興中廣場希岸Deluxe酒店套票**
+…
+
+━━ 珠海（1 個套票）━━
+
+🏨 **珠海金灣華發萬豪酒店套票**
+…
+
+✅ 共 11 個酒店套票 | 🚫 已排除 11 個其他優惠
+━━━━━━━━━━━━━━━━━━━━━━
+📊 掃描：1 頁 | 卡片：22 | 地區排除：7 | 其他排除：4 | 最終保留：11
+━━━━━━━━━━━━━━━━━━━━━━
+🔗 查閱所有套票 → https://www.tilchinalink.com/hotel_packages.php?lang=tc
+```
+
+「無酒店套票」訊息（同樣按地區）：
+```
+🔍 環島中港通 酒店套票 | 17/06/2026
+🔍 今日「指定地區」無酒店套票。已排除 N 個其他地區或非酒店優惠。
+…
+```
+
+### 11.6 對既有章節的影響（v1.3）
+
+| 章節 | v1.3 變更 |
+|---|---|
+| §2.1（網站資料） | 目標網址替換；分頁移除；卡片結構描述新增 |
+| §3.1（合資格） | **不變**（仍要求住宿+車費+餐飲） |
+| §3.2（自動排除） | 新增 §11.3 精簡清單；滑雪/雪場保留 |
+| §4 FR-1.1 | URL 替換 |
+| §4 FR-1.2 | 分頁移除（保留 `MAX_PAGES` 變量供未來） |
+| §6（OpenRouter 模型） | **不再使用** — 標記為「保留供 v1.4」 |
+| §7（Discord 格式） | 按地區分組；新增 detail-page 豐富欄位 |
+| §9（所需 Variables） | 移除 `OPENROUTER_*`（仍可保留以備未來）；新增 `DETAIL_FETCH_TIMEOUT` / `DETAIL_FETCH_WORKERS` |
+
+### 11.7 未列入 v1.3（低 ROI，v1.4 再評估）
+
+- 地區白名單的 env 可調（目前寫死 — 暫不開放）
+- 跨日併發去重（多張卡同 id 不會重複通知 — 因 Discord 訊息按卡片粒度而非 id 粒度）
+- 卡片排序改為價格升序（目前維持卡片原始順序）
+- 多語系支援（`?lang=en` 版 — 暫無需求）
+
+---
+
+*版本 1.3 | 17 June 2026 | 環島中港通酒店套票監察系統 | Henry Fok / Legato Technologies Limited*

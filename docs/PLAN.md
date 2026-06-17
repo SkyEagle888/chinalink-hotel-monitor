@@ -914,4 +914,80 @@ meta-llama/llama-3.3-70b-instruct:free  ← 第三（Meta，131K）
 
 ---
 
-*版本 1.2 | 27 April 2026 | 環島中港通酒店套票監察系統 | Henry Fok / Legato Technologies Limited*
+## T10 — v1.3 目標切換 + 地區白名單（已完成 2026-06-17）
+
+> **狀態**：與 `docs/SCOPE.md` §11 對應 — 全部 8 個項目已實作並通過驗證。  
+> **驗證標準**：60 單元測試 + 20/20 黃金集 + DRY_RUN 煙霧測試 + YAML workflow parse。  
+> **Checkbox 約定**：`[x]` = 已實作且通過驗證。
+
+### T10.1 — 目標網址切換
+
+- [x] **T10.1.1** `BASE_URL` 由 `promotions.php` 改為 `hotel_packages.php?lang=tc`（`scrape_and_notify.py:25`）
+- [x] **T10.1.2** `MAX_PAGES` 由 3 改為 1（頁面無分頁觀察；保留環境變量以備未來）
+- [x] **T10.1.3** `fetch_page()` 移除分頁鏈接構建（單頁獲取）
+
+### T10.2 — 卡片解析器重寫
+
+- [x] **T10.2.1** `parse_promotion()` 從 `<div class="faintivory-background">` + `<h4>` 改為 `<a class="package-wrapper">` + `<h3 class="package-card-title">` + `<span class="package-location">📍 City</span>` + `<span class="package-price">`
+- [x] **T10.2.2** 新增 `region` 欄位至 promo dict
+- [x] **T10.2.3** 新增 `price` 欄位（card-level，「$XXX 起/位」）
+
+### T10.3 — 地區白名單
+
+- [x] **T10.3.1** 新增 `INCLUDE_REGIONS = ["深圳", "廣州", "中山", "珠海"]` 常數
+- [x] **T10.3.2** 新增 `REGION_RANK` 字典（Discord 訊息排序用）
+- [x] **T10.3.3** 新增 `region_allowed(promo)` 函數 — 檢查 `promo["region"] ∈ INCLUDE_REGIONS`
+- [x] **T10.3.4** `prefilter()` 第一步執行地區檢查；無 region 欄位時向後相容（預設放行）
+
+### T10.4 — 排除關鍵詞精簡
+
+- [x] **T10.4.1** `EXCLUDE_KEYWORDS` 由 14 條精簡為 3 條：`["滑雪", "雪場", "雪場套票"]`
+- [x] **T10.4.2** 移除 `HOTEL_KEYWORDS` 第二輪啟發式（hotel_packages.php 已策展，無需第二輪）
+
+### T10.5 — Detail-page 抓取（並行）
+
+- [x] **T10.5.1** 新增 `fetch_detail_page(url)` — 抓取詳情頁，提取 `date` / `nights` / `dining` / `transport` / `room_type`
+- [x] **T10.5.2** 新增 `fetch_detail_pages(promos)` — `ThreadPoolExecutor(max_workers=4)` 並行抓取所有 unique URL
+- [x] **T10.5.3** 新增 `DATE_RE` / `NIGHTS_RE` / `DINING_KEYWORDS_RE` / `TRANSPORT_KEYWORDS_RE` / `ROOM_TYPE_RE` 正則
+- [x] **T10.5.4** 新增 `DETAIL_FETCH_TIMEOUT=15` / `DETAIL_FETCH_WORKERS=4` 環境變量
+
+### T10.6 — Discord 訊息按地區分組
+
+- [x] **T10.6.1** 新增 `sort_by_region(packages)` — 依 INCLUDE_REGIONS 順序排序
+- [x] **T10.6.2** 新增 `group_by_region(packages)` — 按地區分組，僅回傳有卡片的地區
+- [x] **T10.6.3** `_render_package_block()` 改為 card-based 渲染（含 detail-page enriched 欄位）
+- [x] **T10.6.4** `build_discord_message()` header 動態顯示活躍地區
+- [x] **T10.6.5** 新版 Discord 訊息格式見 SCOPE §11.5
+
+### T10.7 — 移除 LLM
+
+- [x] **T10.7.1** 移除 `SYSTEM_PROMPT` 常數
+- [x] **T10.7.2** 移除 `call_llm()` / `_call_single_run()` / `_call_llm_with_url_retry()` / `_invoke_model()` / `_intersect_runs()` / `_parse_llm_json()` / `_validate_urls()` / `_drop_invalid_urls()`
+- [x] **T10.7.3** 移除 `MODELS` / `MAX_LLM_CHARS` / `SELF_CONSISTENCY_RUNS` / `URL_RETRY_LIMIT` 常數
+- [x] **T10.7.4** 移除 `API_KEY` / `BASE_URL_API` 環境變量引用（保留 `OPENROUTER_*` GitHub Variables 以備未來）
+- [x] **T10.7.5** `main()` 移除 LLM 調用步驟；新順序：`scrape_all_pages → compute_hash → prefilter (region+keywords+expired) → fetch_detail_pages → post_to_discord`
+
+### T10.8 — 黃金集 + 測試更新
+
+- [x] **T10.8.1** `evaluation/golden_set.jsonl` 完整重寫為 20 條（11 include：8 深圳 + 2 中山 + 1 珠海；9 exclude：2 滑雪 + 4 區域 + 2 過期 + 1 非酒店）
+- [x] **T10.8.2** `tests/test_t9.py` 移除 LLM 相關測試（TestParseLlmJson、TestIntersectRuns、TestResponseFormatFallback、TestUrlValidation）— 11 個案例
+- [x] **T10.8.3** `tests/test_t9.py` 新增 `TestHotelCardParser`（4 案例）、`TestRegionFilter`（6 案例）、`TestSkiExclusion`（3 案例）、`TestFetchDetailPages`（3 案例）
+- [x] **T10.8.4** `tests/test_t9.py` 更新 `TestConstants` 為 v1.3 預設值
+
+### 與 SCOPE 的可追溯性
+
+| SCOPE ID | PLAN 任務 | 優先級 |
+|---|---|---|
+| §11.1 目標網址變更 | T10.1.1 / 10.1.2 / 10.1.3 | 🔴 必修 |
+| §11.2 地區白名單 | T10.3.1 / 10.3.2 / 10.3.3 / 10.3.4 | 🔴 必修 |
+| §11.3 排除關鍵詞精簡 | T10.4.1 / 10.4.2 | 🟡 高 |
+| §11.4 Detail-page 抓取 | T10.5.1 / 10.5.2 / 10.5.3 / 10.5.4 | 🟡 高 |
+| §11.5 Discord 訊息格式 | T10.6.1 / 10.6.2 / 10.6.3 / 10.6.4 / 10.6.5 | 🟡 中 |
+| §11.6 移除 LLM | T10.7.1 / 10.7.2 / 10.7.3 / 10.7.4 / 10.7.5 | 🟡 中 |
+| §11.8 黃金集 + 測試 | T10.8.1 / 10.8.2 / 10.8.3 / 10.8.4 | 🔴 必修 |
+
+> **未列入 T10（v1.4 再評估）**：env 可調地區白名單、跨日去重、價格排序、英文版支援。
+
+---
+
+*版本 1.3 | 17 June 2026 | 環島中港通酒店套票監察系統 | Henry Fok / Legato Technologies Limited*
