@@ -4,6 +4,27 @@
 
 ---
 
+## 2026-07-21 | [v1.3.1 — Skip Discord when no promotions match]
+
+- **Scope**: `docs/SCOPE.md` §7 + `docs/PLAN.md` T11 + `scrape_and_notify.py` (main() + 删除 `build_no_packages_message` + 简化 `build_discord_message`) + `tests/test_t9.py` (新增 `TestNoPromotionsSkip`) + `docs/ARCHITECTURE.md` (no-show tolerance) + `README.md` (每日行为表) + `docs/CONTEXT-MAP.md` (line numbers + T11 验证)
+- **Trigger**: User observed v1.3 在页面已抓取但無保留卡片时仍发送「🔍 環島中港通 酒店套票」一行空通知 — 多日累积造成 Discord 频道噪音
+- **Key changes**:
+  - `main()` 在 `filtered` 为空时跳过 `post_to_discord()` — emit `run.no_promotions` 事件 + `run.end.discord_sent=False` + 仍更新 `last_hash.txt` + `last_promos.json`
+  - 删除 `build_no_packages_message()` (1003 bytes 死代码)
+  - 简化 `build_discord_message()` — 移除空列表分支；文件字符串新增「调用者责任」说明
+  - 全部行尾 `\r\r\n` → `\n` (file size: 37506 → 35532 bytes — 同步修正了上次提交遗留的混合行尾)
+  - 6 个新测试 (`TestNoPromotionsSkip`) 覆盖：skip Discord / log event / `discord_sent=False` / 全过滤 / 状态文件更新 / 有保留时仍发送（回归）
+- **Validation**:
+  - ✅ `python -m py_compile scrape_and_notify.py`
+  - ✅ `python -m unittest tests.test_t9` — **66/66 pass** (60 pre-existing + 6 new)
+  - ✅ `python -m evaluation.evaluate` — **20/20 (100%)**
+- **Workflow**: `.github/workflows/hotel-monitor.yml` **未变更** — monitor job 退出码不再依赖 Discord 发送（跳过路径直接 return 0）
+- **Risk**: Low — surgical 行为变更；`main()` 调用顺序保留 (T10.7.5)；仅 Discord 通知路径受影响
+- **Rollback**: `git revert HEAD` — 恢复 `build_no_packages_message` + 旧 `main()` 流程 + 6 个新测试
+- **Note**: 用户在 v1.3.1 实际关注点为「是否有新套票可买」而非「今日无套票」的日常确认 — 反映了 Discord 频道的信号/噪音比优化考量
+
+---
+
 ## 2026-06-17 | [v1.3 — Target switch to hotel_packages.php?lang=tc + region whitelist]
 
 - **Scope**: `docs/SCOPE.md` §11 (new v1.3 additive section) + `docs/PLAN.md` T10 + `scrape_and_notify.py` (major refactor) + `tests/test_t9.py` + `evaluation/golden_set.jsonl` + `docs/ARCHITECTURE.md` + `docs/CONTEXT-MAP.md` + `README.md`

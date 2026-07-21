@@ -990,4 +990,54 @@ meta-llama/llama-3.3-70b-instruct:free  ← 第三（Meta，131K）
 
 ---
 
-*版本 1.3 | 17 June 2026 | 環島中港通酒店套票監察系統 | Henry Fok / Legato Technologies Limited*
+## T11 — 跳過「無酒店套票」Discord 通知（已完成 2026-07-21）
+
+> **狀態**：與 `docs/SCOPE.md` §7 對應 — 已實作並通過驗證（66 單元測試 + 20/20 黃金集）。  
+> **動機**：v1.3 在頁面已抓取但無保留卡片時仍發送「🔍 環島中港通 酒店套票 | …」一行空通知。考慮到 Discord 頻道主要用於接收**新套票**而非日常確認，連續多日的「無套票」通知會造成噪音並稀釋訊號。  
+> **範圍**：僅影響 `main()` 在 `filtered` 為空時的行為。其餘流程（抓取、雜湊、預篩選、狀態持久化）完全不變。
+
+### T11.1 — 行為變更
+
+- [x] **T11.1.1** `main()` 在 `filtered` 為空時跳過 `post_to_discord()` 呼叫 — `if not filtered: ... else: build + post`（`scrape_and_notify.py:956-976`）
+- [x] **T11.1.2** 跳過 Discord 時 emit `run.no_promotions` 結構化事件 — 含 `total_promos` / `region_excluded` / `other_excluded`（用於日誌觀測）
+- [x] **T11.1.3** `run.end` 事件新增 `discord_sent: bool` 欄位 — 反映本次執行是否實際發送 Discord（便於事後分析）
+- [x] **T11.1.4** 即使跳過 Discord，`save_hash()` + `save_last_promos()` 仍執行 — 避免下次重複處理同一空結果
+
+### T11.2 — 代碼精簡
+
+- [x] **T11.2.1** 刪除 `build_no_packages_message()` 函式（已無調用者）
+- [x] **T11.2.2** 簡化 `build_discord_message()` — 移除空列表分支（`if hotel_count == 0: return build_no_packages_message(...)`），文件字串新增調用者責任說明
+- [x] **T11.2.3** 移除 `build_no_packages_message` 後，原 v1.3 估計 1003 bytes 死代碼一併清空
+
+### T11.3 — 測試
+
+- [x] **T11.3.1** 新增 `TestNoPromotionsSkip` 測試類（6 案例）：
+  - `test_no_promotions_skips_discord` — 驗證 `post_to_discord` 未被呼叫
+  - `test_no_promotions_emits_log_event` — 驗證 `run.no_promotions` 事件
+  - `test_no_promotions_run_end_has_discord_sent_false` — 驗證 `run.end.discord_sent=False`
+  - `test_all_filtered_out_skips_discord` — 全部被地區過濾掉的情境
+  - `test_state_files_updated_even_when_no_promotions` — 狀態檔仍更新
+  - `test_with_promotions_still_posts` — 回歸測試：有保留卡片時仍正常發送
+- [x] **T11.3.2** 測試總數：60 → 66（+6 案例）
+
+### T11.4 — 對 GitHub Action 影響
+
+- 無需變更 workflow 檔。`monitor` job 的退出碼不再依賴 Discord 呼叫成功（跳過時腳本直接 return 0）。原本依賴 Discord 失敗重試的場景（3 次重試）現在僅在**實際發送**時觸發，無副作用。
+
+### 與 SCOPE 的可追溯性
+
+| SCOPE ID | PLAN 任務 | 優先級 |
+|---|---|---|
+| §7「無酒店套票時」v1.3.1 變更 | T11.1.1 / 11.1.2 / 11.1.3 / 11.1.4 | 🟡 中 |
+| §11.5 v1.3.1 變更註記 | T11.2.1 / 11.2.2 / 11.2.3 | 🟢 低 |
+| 新測試套件 | T11.3.1 / 11.3.2 | 🟡 中 |
+| Workflow 行為驗證 | T11.4 | 🟢 低 |
+
+> **未列入 T11（低 ROI）**：
+> - `run.no_promotions` 事件不發送至 Discord（屬冗餘 — 用戶關注點為「有新套票」）
+> - Discord 端加「靜音時間」邏輯（會增加 Workflow 複雜度）
+> - 在「無套票」時改發送 email 摘要（超出當前監察範圍）
+
+---
+
+*版本 1.3.1 | 21 July 2026 | 環島中港通酒店套票監察系統 | Henry Fok / Legato Technologies Limited*

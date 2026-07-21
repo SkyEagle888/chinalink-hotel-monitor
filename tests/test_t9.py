@@ -696,6 +696,138 @@ class TestFetchDetailPages(unittest.TestCase):
         self.assertEqual(fdp.call_count, 2)
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# v1.3.1 — Skip Discord when no promotions match
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TestNoPromotionsSkip(unittest.TestCase):
+    """v1.3.1：無保留卡片時跳過 Discord 通知，但仍更新狀態檔。"""
+
+    def setUp(self):
+        self._orig_dry = san.DRY_RUN
+        self._orig_hash_file = san.HASH_FILE
+        self._orig_promos_file = san.PROMOS_FILE
+        self._tmpdir = Path(tempfile.mkdtemp())
+        san.HASH_FILE = str(self._tmpdir / "last_hash.txt")
+        san.PROMOS_FILE = str(self._tmpdir / "last_promos.json")
+        san.DRY_RUN = False
+        self.events: list[str] = []
+
+        class _Capture(logging.Handler):
+            def emit(self, record):
+                self.events.append(record.getMessage())
+
+        self._capture = _Capture()
+        self._capture.events = self.events
+        san._STRUCT_LOGGER.addHandler(self._capture)
+
+    def tearDown(self):
+        san.DRY_RUN = self._orig_dry
+        san.HASH_FILE = self._orig_hash_file
+        san.PROMOS_FILE = self._orig_promos_file
+        san._STRUCT_LOGGER.removeHandler(self._capture)
+        for f in self._tmpdir.iterdir():
+            f.unlink()
+        self._tmpdir.rmdir()
+
+    def _events_of(self, name: str) -> list[dict]:
+        return [
+            json.loads(line) for line in self.events
+            if line.startswith("{") and f'"event": "{name}"' in line
+        ]
+
+    def test_no_promotions_skips_discord(self):
+        """頁面已抓取但無任何卡片 → 不發 Discord，但更新狀態檔。"""
+        # Page has content, hash differs from saved (forces prefilter path)
+        with mock.patch.object(san, "scrape_all_pages") as mscrape, \
+             mock.patch.object(san, "post_to_discord") as mpost, \
+             mock.patch.object(san, "load_last_hash", return_value="old-hash"):
+            mscrape.return_value = ("raw text with content", [], 1)
+            san.main()
+
+        mpost.assert_not_called()
+
+    def test_no_promotions_emits_log_event(self):
+        """無保留卡片時須發出 run.no_promotions 結構化事件。"""
+        with mock.patch.object(san, "scrape_all_pages") as mscrape, \
+             mock.patch.object(san, "post_to_discord") as mpost, \
+             mock.patch.object(san, "load_last_hash", return_value="old-hash"):
+            mscrape.return_value = ("raw text with content", [], 1)
+            san.main()
+
+        events = self._events_of("run.no_promotions")
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0]["total_promos"], 0)
+        self.assertEqual(events[0]["region_excluded"], 0)
+        self.assertEqual(events[0]["other_excluded"], 0)
+
+    def test_no_promotions_run_end_has_discord_sent_false(self):
+        """run.end 事件須反映 discord_sent=False。"""
+        with mock.patch.object(san, "scrape_all_pages") as mscrape, \
+             mock.patch.object(san, "post_to_discord") as mpost, \
+             mock.patch.object(san, "load_last_hash", return_value="old-hash"):
+            mscrape.return_value = ("raw text with content", [], 1)
+            san.main()
+
+        ends = self._events_of("run.end")
+        self.assertEqual(len(ends), 1)
+        self.assertFalse(ends[0]["discord_sent"])
+        self.assertEqual(ends[0]["hotel_count"], 0)
+
+    def test_all_filtered_out_skips_discord(self):
+        """有卡片但全部被地區/關鍵詞過濾掉 → 仍跳過 Discord。"""
+        promos = [
+            {"title": "惠州皇冠假日酒店套票", "region": "惠州",
+             "date": "2026-06-01", "url": "https://x.com/?id=1"},
+            {"title": "佛山希爾頓酒店套票", "region": "佛山",
+             "date": "2026-06-01", "url": "https://x.com/?id=2"},
+        ]
+        with mock.patch.object(san, "scrape_all_pages") as mscrape, \
+             mock.patch.object(san, "post_to_discord") as mpost, \
+             mock.patch.object(san, "load_last_hash", return_value="old-hash"):
+            mscrape.return_value = ("raw text", promos, 1)
+            san.main()
+
+        mpost.assert_not_called()
+        events = self._events_of("run.no_promotions")
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0]["region_excluded"], 2)
+
+    def test_state_files_updated_even_when_no_promotions(self):
+        """即使無保留卡片，狀態檔仍須更新以避免下次重複處理。"""
+        with mock.patch.object(san, "scrape_all_pages") as mscrape, \
+             mock.patch.object(san, "post_to_discord") as mpost, \
+             mock.patch.object(san, "load_last_hash", return_value="old-hash"):
+            mscrape.return_value = ("raw text with content", [], 1)
+            san.main()
+
+        # last_hash.txt should now exist with the new hash
+        self.assertTrue(Path(san.HASH_FILE).exists())
+        # last_promos.json should exist
+        self.assertTrue(Path(san.PROMOS_FILE).exists())
+
+    def test_with_promotions_still_posts(self):
+        """有保留卡片時仍正常發 Discord（回歸測試）。"""
+        promos = [
+            {
+                "title": "寶安登喜路國際大酒店套票",
+                "region": "深圳",
+                "date": "2026-06-01",
+                "url": "https://www.tilchinalink.com/promotions.php?id=85&lang=tc",
+            }
+        ]
+        with mock.patch.object(san, "scrape_all_pages") as mscrape, \
+             mock.patch.object(san, "post_to_discord") as mpost, \
+             mock.patch.object(san, "fetch_detail_pages", side_effect=lambda x: x), \
+             mock.patch.object(san, "load_last_hash", return_value="old-hash"):
+            mscrape.return_value = ("raw text", promos, 1)
+            san.main()
+
+        mpost.assert_called_once()
+        ends = self._events_of("run.end")
+        self.assertTrue(ends[0]["discord_sent"])
+
+
 def _parse_dry_run_env() -> bool:
     return os.environ.get("DRY_RUN", "").lower() in ("1", "true", "yes")
 

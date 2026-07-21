@@ -82,7 +82,10 @@ No traditional database. In-memory per run + 2 persistent in-repo files:
 - **Eligibility check** (residual): `has_hotel_keyword()` — title/content/summary 至少含「住宿/入住/房間/房」一項
 - **Expiry**: end date in content/summary < TODAY → expired; publish date > 180 days w/o end date → stale
   - ✅ Aligned with `SCOPE.md` FR-6.4 (180 days); env-tunable via `PROMO_STALE_DAYS`
-- **No-show tolerance**: page unchanged → 0 Discord posts; prefilter eliminates all → "今日無酒店套票"
+- **No-show tolerance**:
+  - page unchanged → 1 Discord post (「今日頁面無更新」一行通知)
+  - page changed + prefilter eliminates all → **0 Discord posts (v1.3.1)** — 僅寫入 `run.no_promotions` 結構化事件 + 更新狀態檔
+  - page changed + has retained cards → 1 Discord post (按地區分組套票摘要)
 - **Discord reliability** (T9.6.1): exponential-backoff retry (`DISCORD_RETRY_MAX=3`, `backoff=2s/4s`)
 - **Test mode** (T9.6.5): `DRY_RUN=true` → no HTTP, only structured log
 - **Output contract**: Discord message ≤2000 chars (truncated to 1950+ellipsis)
