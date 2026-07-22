@@ -1040,4 +1040,46 @@ meta-llama/llama-3.3-70b-instruct:free  ← 第三（Meta，131K）
 
 ---
 
-*版本 1.3.1 | 21 July 2026 | 環島中港通酒店套票監察系統 | Henry Fok / Legato Technologies Limited*
+## T12 — 跳過「頁面無變更」Discord 通知（已完成 2026-07-22）
+
+> **狀態**：與 `docs/SCOPE.md` §7 對應 — 已實作並通過驗證（72 單元測試 + 20/20 黃金集）。  
+> **動機**：T11 已對「頁面有更新但無保留卡片」路徑靜默化，但「頁面無更新」仍會每日發送一行確認通知，與 T11 設計理念（「Discord 僅承載實質新套票訊號」）不一致；用戶每日都會見到一條「無更新」訊息，屬於噪音。  
+> **範圍**：僅影響 `main()` 中 `current_hash == load_last_hash()` 早退分支的行為。其餘流程完全不變。
+
+### T12.1 — 行為變更
+
+- [x] **T12.1.1** `main()` 在雜湊相同時刪除 `post_to_discord()` 呼叫 + 刪除 `build_stats_footer()` 內聯調用 — 改為僅 emit `run.no_change` 結構化事件 + `return`（`scrape_and_notify.py:887-895`）
+- [x] **T12.1.2** `run.no_change` 事件新增 `total_promos` 欄位（與 `run.no_promotions` 對齊觀測維度）
+- [x] **T12.1.3** 由於「無更新」分支無新內容需要持久化，`save_hash()` / `save_last_promos()` 跳過執行（雜湊值本就未變）
+
+### T12.2 — 測試
+
+- [x] **T12.2.1** 新增 `TestNoChangeSkip` 測試類（6 案例）：
+  - `test_no_change_skips_discord` — 驗證 `post_to_discord` 未被呼叫
+  - `test_no_change_emits_log_event` — 驗證 `run.no_change` 事件含 `pages` / `total_promos`
+  - `test_no_change_skips_prefilter_and_state_persist` — 驗證不執行 `prefilter` / `save_hash` / `save_last_promos`
+  - `test_no_change_does_not_emit_run_no_promotions` — 防止 T11/T12 事件混淆
+  - `test_no_change_with_cards_still_silent` — 頁面無更新即使原本有卡片 → 仍靜默
+  - `test_changed_page_still_runs_full_pipeline` — 回歸測試：雜湊不同時仍走完整流程
+- [x] **T12.2.2** 測試總數：66 → 72（+6 案例）
+
+### T12.3 — 對 GitHub Action 影響
+
+- 無需變更 workflow 檔。`monitor` job 在「無更新」分支直接 `return`，行為與 T11 「無保留卡片」分支一致。
+- 影響：每日 Discord 訊息量進一步下降；commit-hash job 不再因「無更新」執行而產生空 noise commit（實際上早就沒有 — 因 `save_hash()` 跳過，雜湊值未變）。
+
+### 與 SCOPE 的可追溯性
+
+| SCOPE ID | PLAN 任務 | 優先級 |
+|---|---|---|
+| §7「頁面無變更時」v1.3.2 變更 | T12.1.1 / 12.1.2 / 12.1.3 | 🟡 中 |
+| 新測試套件 | T12.2.1 / 12.2.2 | 🟡 中 |
+| Workflow 行為驗證 | T12.3 | 🟢 低 |
+
+> **未列入 T12（低 ROI）**：
+> - 在 `run.no_change` 之後 emit `run.end` 帶 `discord_sent=False`（v1.3.2 設計選擇：徹底早退，不留結構化「執行結束」記錄 — 與 T11 對稱，T11 是 emit `run.end` 後才 return，原因是 T11 仍會更新狀態檔；T12 則兩者皆無）
+> - 為「無更新」分支增加「上次更新時間」計算（需引入持久化的 `last_change_at` 元數據，超出當前監察範圍）
+
+---
+
+*版本 1.3.2 | 22 July 2026 | 環島中港通酒店套票監察系統 | Henry Fok / Legato Technologies Limited*

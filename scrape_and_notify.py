@@ -1,5 +1,5 @@
 """
-環島中港通 — 每日酒店套票監察系統（v1.3）
+環島中港通 — 每日酒店套票監察系統（v1.3.2）
 
 抓取 hotel_packages.php?lang=tc（網站已預先篩選為「酒店套票」之頁面），
 依用戶指定地區（深圳/廣州/中山/珠海）過濾卡片，再以程序化規則排除
@@ -887,19 +887,12 @@ def main() -> None:
     # 步驟 2：變更偵測
     current_hash = compute_hash(raw_text)
     if current_hash == load_last_hash():
-        stats_no_change = build_stats_footer(
-            pages_scanned, len(all_promotions), 0, 0, 0
+        _log_event(
+            "run.no_change",
+            pages=pages_scanned,
+            total_promos=len(all_promotions),
         )
-        post_to_discord(
-            f"ℹ️ **環島中港通 酒店套票** — "
-            f"今日頁面無更新（{TODAY_SHORT}）\n\n"
-            f"━━━━━━━━━━━━━━━━━━━━━━\n"
-            f"{stats_no_change}\n"
-            f"━━━━━━━━━━━━━━━━━━━━━━\n"
-            f"🔗 查閱所有套票 → {BASE_URL}"
-        )
-        _log_event("run.no_change", pages=pages_scanned)
-        print("[INFO] 無變更，提前退出。")
+        print("[INFO] 無變更，跳過 Discord 通知，提前退出。")
         return
 
     print("[INFO] 頁面內容已更新 — 進行地區 + 預篩選")

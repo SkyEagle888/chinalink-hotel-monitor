@@ -1,6 +1,6 @@
 # AGENTS.md — chinalink-hotel-monitor
 
-> Format: `.md` (always) | Last updated: 2026-06-06
+> Format: `.md` (always) | Last updated: 2026-07-22
 
 ## Workflow Rules
 - Daily 09:00 HKT cron (GitHub Actions) + manual trigger via `workflow_dispatch`
@@ -8,7 +8,7 @@
 - 3-job workflow: `monitor` (read) → `commit-hash` (write) + `evaluate` (read, manual only)
 - Pre-commit validation (all 3 must pass):
   - `python -m py_compile scrape_and_notify.py`
-  - `python -m unittest tests.test_t9` (53 cases)
+  - `python -m unittest tests.test_t9` (72 cases — v1.3.2: 66 + 6 TestNoChangeSkip)
   - `python -m evaluation.evaluate` (golden set 20/20)
 - No external state store — `last_hash.txt` (SHA-256) + `last_promos.json` (promo list) for change + diff detection
 - Secrets must NEVER appear in source — use GitHub Secrets/Variables only

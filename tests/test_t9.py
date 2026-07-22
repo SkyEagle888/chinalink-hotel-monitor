@@ -697,6 +697,142 @@ class TestFetchDetailPages(unittest.TestCase):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# v1.3.2 — Skip Discord when page has no changes
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TestNoChangeSkip(unittest.TestCase):
+    """v1.3.2：頁面無變更時跳過 Discord 通知（靜默退出），仍 emit run.no_change。"""
+
+    def setUp(self):
+        self._orig_dry = san.DRY_RUN
+        self._orig_hash_file = san.HASH_FILE
+        self._orig_promos_file = san.PROMOS_FILE
+        self._tmpdir = Path(tempfile.mkdtemp())
+        san.HASH_FILE = str(self._tmpdir / "last_hash.txt")
+        san.PROMOS_FILE = str(self._tmpdir / "last_promos.json")
+        san.DRY_RUN = False
+        self.events: list[str] = []
+
+        class _Capture(logging.Handler):
+            def emit(self, record):
+                self.events.append(record.getMessage())
+
+        self._capture = _Capture()
+        self._capture.events = self.events
+        san._STRUCT_LOGGER.addHandler(self._capture)
+
+    def tearDown(self):
+        san.DRY_RUN = self._orig_dry
+        san.HASH_FILE = self._orig_hash_file
+        san.PROMOS_FILE = self._orig_promos_file
+        san._STRUCT_LOGGER.removeHandler(self._capture)
+        for f in self._tmpdir.iterdir():
+            f.unlink()
+        self._tmpdir.rmdir()
+
+    def _events_of(self, name: str) -> list[dict]:
+        return [
+            json.loads(line) for line in self.events
+            if line.startswith("{") and f'"event": "{name}"' in line
+        ]
+
+    def _matching_hash_setup(self, raw_text: str = "raw text with cards"):
+        """Configure mocks so compute_hash(raw_text) == load_last_hash().
+
+        The script's compute_hash() is non-trivial (normalises + hashes JSON),
+        so we patch it to return a deterministic value and align load_last_hash.
+        """
+        return (
+            mock.patch.object(san, "compute_hash", return_value="same-hash"),
+            mock.patch.object(san, "load_last_hash", return_value="same-hash"),
+            mock.patch.object(san, "scrape_all_pages",
+                              return_value=(raw_text, [], 1)),
+        )
+
+    def test_no_change_skips_discord(self):
+        """頁面雜湊與上次相同 → 不發 Discord。"""
+        ch, lh, sp = self._matching_hash_setup()
+        with ch, lh, sp, \
+             mock.patch.object(san, "post_to_discord") as mpost:
+            san.main()
+
+        mpost.assert_not_called()
+
+    def test_no_change_emits_log_event(self):
+        """無變更時須發出 run.no_change 結構化事件（含 pages / total_promos）。"""
+        ch, lh, sp = self._matching_hash_setup()
+        with ch, lh, sp, \
+             mock.patch.object(san, "post_to_discord") as mpost:
+            san.main()
+
+        events = self._events_of("run.no_change")
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0]["pages"], 1)
+        self.assertEqual(events[0]["total_promos"], 0)
+
+    def test_no_change_skips_prefilter_and_state_persist(self):
+        """無變更分支應在 run.no_change 後直接 return，不執行 prefilter / save_*。"""
+        ch, lh, sp = self._matching_hash_setup()
+        with ch, lh, sp, \
+             mock.patch.object(san, "post_to_discord") as mpost, \
+             mock.patch.object(san, "prefilter") as mpref, \
+             mock.patch.object(san, "save_hash") as msh, \
+             mock.patch.object(san, "save_last_promos") as msp:
+            san.main()
+
+        mpost.assert_not_called()
+        mpref.assert_not_called()
+        msh.assert_not_called()
+        msp.assert_not_called()
+
+    def test_no_change_does_not_emit_run_no_promotions(self):
+        """無變更分支不應誤觸發 run.no_promotions（防止與 T11 事件混淆）。"""
+        ch, lh, sp = self._matching_hash_setup()
+        with ch, lh, sp, \
+             mock.patch.object(san, "post_to_discord") as mpost:
+            san.main()
+
+        self.assertEqual(len(self._events_of("run.no_promotions")), 0)
+        self.assertEqual(len(self._events_of("run.end")), 0)
+
+    def test_no_change_with_cards_still_silent(self):
+        """頁面無變更即使原本有卡片 → 仍靜默（用戶意圖：無更新即無通知）。"""
+        promos = [
+            {"title": "深圳寶安登喜路酒店套票", "region": "深圳",
+             "date": "2026-06-01", "url": "https://x.com/?id=85"},
+        ]
+        ch, lh, sp = self._matching_hash_setup(raw_text="raw text w/ cards")
+        with mock.patch.object(san, "scrape_all_pages",
+                               return_value=("raw text w/ cards", promos, 1)), \
+             ch, lh, \
+             mock.patch.object(san, "post_to_discord") as mpost:
+            san.main()
+
+        mpost.assert_not_called()
+        events = self._events_of("run.no_change")
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0]["total_promos"], 1)
+
+    def test_changed_page_still_runs_full_pipeline(self):
+        """回歸測試：頁面雜湊不同時仍走完整流程（不被新邏輯誤吞）。"""
+        promos = [
+            {"title": "深圳寶安登喜路酒店套票", "region": "深圳",
+             "date": "2026-06-01", "url": "https://x.com/?id=85"},
+        ]
+        with mock.patch.object(san, "compute_hash", return_value="new-hash"), \
+             mock.patch.object(san, "load_last_hash", return_value="old-hash"), \
+             mock.patch.object(san, "scrape_all_pages",
+                               return_value=("raw text", promos, 1)), \
+             mock.patch.object(san, "fetch_detail_pages",
+                               side_effect=lambda x: x), \
+             mock.patch.object(san, "post_to_discord") as mpost:
+            san.main()
+
+        mpost.assert_called_once()
+        self.assertEqual(len(self._events_of("run.no_change")), 0)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # v1.3.1 — Skip Discord when no promotions match
 # ─────────────────────────────────────────────────────────────────────────────
 
