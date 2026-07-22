@@ -42,7 +42,7 @@
 - DO NOT modify `last_hash.txt` / `last_promos.json` manually — only the GitHub Actions bot commits.
 - DO NOT add new dependencies without explicit approval.
 - DO NOT change Discord message structure without updating `docs/SCOPE.md` §7.
-- Honour `EXCLUDE_KEYWORDS` and `MODELS` lists as source of truth for filter logic and LLM fallback chain.
-- When refactoring `scrape_and_notify.py`, preserve the `main()` call order: `scrape_all_pages → compute_hash → prefilter → call_llm → post_to_discord`.
+- Honour `EXCLUDE_KEYWORDS` and `INCLUDE_REGIONS` lists as source of truth for filter logic. (v1.3+ — `MODELS` and LLM fallback chain were removed; pipeline is now fully deterministic.)
+- When refactoring `scrape_and_notify.py`, preserve the `main()` call order: `scrape_all_pages → compute_hash → prefilter (region+keywords+expired) → fetch_detail_pages → post_to_discord`.
 - Use `DRY_RUN=true` env var for smoke tests; never post to Discord from local development without explicit approval.
 - Discord retry config is env-tunable: `DISCORD_RETRY_MAX` (default 3) + `DISCORD_RETRY_BACKOFF` (default 2).

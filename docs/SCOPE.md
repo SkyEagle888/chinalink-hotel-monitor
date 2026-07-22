@@ -303,19 +303,21 @@ Discord 訊息（避免噪音），僅：
 
 | Secret 名稱 | 說明 |
 |---|---|
-| `OPENROUTER_API_KEY` | 來自 openrouter.ai 的 API 金鑰（免費帳戶） |
-| `DISCORD_WEBHOOK_URL` | 來自 Discord 頻道設置的 Incoming Webhook URL |
+| `OPENROUTER_API_KEY` | ⚠️ **v1.3+ 不再需要** — v1.2 LLM pipeline 已移除；保留以備未來重新啟用（刪除亦無害） |
+| `DISCORD_WEBHOOK_URL` | 來自 Discord 頻道設置的 Incoming Webhook URL（**v1.3+ 唯一必需的 secret**） |
 
 ## 9. 所需 Variables
 
-以下參數透過 **GitHub Actions → Variables** 設定，方便更換模型或 API 端點而無需修改代碼：
+以下參數透過 **GitHub Actions → Variables** 設定：
 
 | Variable 名稱 | 預設值 | 說明 |
 |---|---|---|
-| `OPENROUTER_BASE_URL` | `https://openrouter.ai/api/v1` | OpenRouter API 基礎 URL |
-| `OPENROUTER_MODEL_PRIMARY` | `qwen/qwen3-next-80b:free` | 主要模型（Alibaba Qwen） |
-| `OPENROUTER_MODEL_SECONDARY` | `z-ai/glm-4.5-air:free` | 備用模型（智譜 AI GLM） |
-| `OPENROUTER_MODEL_TERTIARY` | `meta-llama/llama-3.3-70b-instruct:free` | 第三備用模型（Meta Llama） |
+| `OPENROUTER_BASE_URL` | `https://openrouter.ai/api/v1` | ⚠️ **v1.3+ 不再使用** — LLM pipeline 已移除；保留供 v1.4+ |
+| `OPENROUTER_MODEL_PRIMARY` | `qwen/qwen3-next-80b:free` | ⚠️ **v1.3+ 不再使用** — 主要模型（Alibaba Qwen） |
+| `OPENROUTER_MODEL_SECONDARY` | `z-ai/glm-4.5-air:free` | ⚠️ **v1.3+ 不再使用** — 備用模型（智譜 AI GLM） |
+| `OPENROUTER_MODEL_TERTIARY` | `meta-llama/llama-3.3-70b-instruct:free` | ⚠️ **v1.3+ 不再使用** — 第三備用模型（Meta Llama） |
+
+> ℹ️ **v1.3 起**：上述 OPENROUTER_* 全部為 **legacy / no-op**。Pipeline 完全 deterministic（trust site labels + 4-region whitelist + keyword exclusion + 180-day expiry），每月成本 **$0**。如要徹底清理 GitHub repo，可從 Secrets / Variables 頁面刪除 — 對執行無副作用。
 
 ---
 
